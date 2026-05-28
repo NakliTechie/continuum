@@ -10,7 +10,7 @@
 package protocol
 
 // Version is the protocol version this relay speaks.
-const Version = "1.0"
+const Version = "1.1"
 
 // Message type discriminators.
 const (
@@ -26,6 +26,11 @@ const (
 	TypeResume       = "resume"
 	TypeResumeFailed = "resume_failed"
 	TypeError        = "error"
+
+	// protocol 1.1: live re-attach after a client reconnect
+	TypeSessions = "sessions"
+	TypeAttach   = "attach"
+	TypeAttached = "attached"
 )
 
 // Error codes. The set is open-ended (clients must tolerate unknown codes);
@@ -158,4 +163,37 @@ type Error struct {
 // NewError builds an Error message.
 func NewError(sessionID, code, message string) Error {
 	return Error{Type: TypeError, SessionID: sessionID, Code: code, Message: message}
+}
+
+// ---- protocol 1.1: live re-attach ----
+
+// SessionInfo describes one live session in a Sessions list.
+type SessionInfo struct {
+	SessionID string `json:"session_id"`
+	Agent     string `json:"agent"`
+	StartedAt string `json:"started_at"`
+	PID       int    `json:"pid"`
+}
+
+// Sessions (relay -> browser) lists live sessions, sent right after `registered`.
+type Sessions struct {
+	Type     string        `json:"type"`
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// Attach (browser -> relay) re-attaches a registered client to an existing session.
+type Attach struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+}
+
+// Attached (relay -> browser) confirms re-attach and issues a fresh session token.
+// The relay then replays the session's buffered output and resumes live streaming.
+type Attached struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
+	Agent        string `json:"agent"`
+	StartedAt    string `json:"started_at"`
+	PID          int    `json:"pid"`
 }

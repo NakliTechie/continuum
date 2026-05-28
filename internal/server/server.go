@@ -1,8 +1,10 @@
 // Package server implements the relay's WebSocket server.
 //
-// P3 scope: the hello + register handshake, origin enforcement, and live PTY
-// sessions — spawn / input / signal / output / event. Reconnect-resume + FSA
-// replay land in P4.
+// Sessions are owned by the Server and outlive any single connection: each
+// session's output is delivered to its current "subscriber" connection. On a
+// client reconnect, the relay advertises live sessions (`sessions`) and the
+// client re-attaches (`attach`) — the relay re-issues a fresh session token,
+// replays buffered output, and resumes streaming (protocol 1.1).
 package server
 
 import (
@@ -31,9 +33,18 @@ import (
 const RelayVersion = "0.1.0"
 
 type sessionEntry struct {
-	token string
-	sess  *pty.Session
+	token     string
+	sess      *pty.Session
+	agent     string
+	startedAt time.Time
+	pid       int
+
+	subMu sync.Mutex
+	sub   *conn // current subscriber connection (may be nil between reconnects)
 }
+
+func (e *sessionEntry) setSub(cn *conn) { e.subMu.Lock(); e.sub = cn; e.subMu.Unlock() }
+func (e *sessionEntry) subscriber() *conn { e.subMu.Lock(); defer e.subMu.Unlock(); return e.sub }
 
 // Server holds relay-wide state shared across connections.
 type Server struct {
@@ -64,10 +75,16 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-func (s *Server) addSession(id, token string, sess *pty.Session) {
+func (s *Server) addSession(e *sessionEntry, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[id] = &sessionEntry{token: token, sess: sess}
+	s.sessions[id] = e
+}
+
+func (s *Server) entry(id string) *sessionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[id]
 }
 
 // getSession returns the session iff the token matches (constant-time).
@@ -84,16 +101,74 @@ func (s *Server) getSession(id, token string) (*pty.Session, bool) {
 	return e.sess, true
 }
 
+func (s *Server) reissueToken(id, token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.sessions[id]; e != nil {
+		e.token = token
+	}
+}
+
 func (s *Server) removeSession(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, id)
 }
 
+// listSessions snapshots the live sessions for the `sessions` message.
+func (s *Server) listSessions() []protocol.SessionInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]protocol.SessionInfo, 0, len(s.sessions))
+	for id, e := range s.sessions {
+		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid})
+	}
+	return out
+}
+
+// detach clears any session subscription pointing at a closing connection.
+func (s *Server) detach(cn *conn) {
+	s.mu.Lock()
+	entries := make([]*sessionEntry, 0, len(s.sessions))
+	for _, e := range s.sessions {
+		entries = append(entries, e)
+	}
+	s.mu.Unlock()
+	for _, e := range entries {
+		e.subMu.Lock()
+		if e.sub == cn {
+			e.sub = nil
+		}
+		e.subMu.Unlock()
+	}
+}
+
+// deliverOutput routes a session's output to its current subscriber.
+func (s *Server) deliverOutput(id string, seq int, b []byte) {
+	e := s.entry(id)
+	if e == nil {
+		return
+	}
+	if sub := e.subscriber(); sub != nil {
+		_ = sub.send(protocol.Output{Type: protocol.TypeOutput, SessionID: id, Data: base64.StdEncoding.EncodeToString(b), Seq: seq})
+	}
+}
+
+// deliverEvent routes a lifecycle event to a session's current subscriber.
+func (s *Server) deliverEvent(id, event string, code *int) {
+	e := s.entry(id)
+	if e == nil {
+		return
+	}
+	if sub := e.subscriber(); sub != nil {
+		_ = sub.send(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
+	}
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	// Origin check is the gate (§8). Browsers always send Origin; "null" covers
-	// file:// dev. Empty Origin = non-browser client (agent face, §16) → allowed
-	// to proceed to token-based register.
+	// Origin check is the gate (§8). Browsers always send Origin; "null" must be
+	// opted in (it also matches sandboxed iframes). Empty Origin = non-browser
+	// client (agent face, §16) → allowed to proceed to token-based register.
 	origin := r.Header.Get("Origin")
 	if origin != "" && !s.cfg.OriginAllowed(origin) {
 		log.Printf("rejected upgrade from disallowed origin %q", origin)
@@ -112,11 +187,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	cn := &conn{srv: s, ws: c, ctx: r.Context()}
 	cn.serve()
+	s.detach(cn)
 }
 
 // conn is one browser<->relay WebSocket connection. All writes go through
-// send(), which serializes them (a session's output goroutine writes
-// concurrently with the read loop).
+// send(), which serializes them (session output goroutines write concurrently
+// with the read loop, and a connection can subscribe to multiple sessions).
 type conn struct {
 	srv        *Server
 	ws         *websocket.Conn
@@ -177,12 +253,14 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 	switch env.Type {
 	case protocol.TypeSpawn:
 		cn.handleSpawn(raw)
+	case protocol.TypeAttach:
+		cn.handleAttach(raw)
 	case protocol.TypeInput:
 		cn.handleInput(raw)
 	case protocol.TypeSignal:
 		cn.handleSignal(raw)
 	case protocol.TypeResume:
-		// Reconnect-resume lands in P4; for now the client falls back to FSA replay.
+		// Superseded by sessions+attach (1.1); keep a graceful answer for old clients.
 		var msg protocol.Resume
 		_ = json.Unmarshal(raw, &msg)
 		_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
@@ -205,6 +283,8 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 	}
 	cn.registered = true
 	_ = cn.send(protocol.Registered{Type: protocol.TypeRegistered})
+	// Advertise live sessions so a reconnecting client can re-attach (1.1).
+	_ = cn.send(protocol.Sessions{Type: protocol.TypeSessions, Sessions: cn.srv.listSessions()})
 	log.Printf("client registered")
 }
 
@@ -236,7 +316,8 @@ func (cn *conn) handleSpawn(raw json.RawMessage) {
 		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
-	cn.srv.addSession(id, token, sess)
+	s := cn.srv
+	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn}, id)
 	_ = cn.send(protocol.Spawned{
 		Type:         protocol.TypeSpawned,
 		SessionID:    id,
@@ -250,33 +331,51 @@ func (cn *conn) handleSpawn(raw json.RawMessage) {
 
 	go sess.Run(
 		func(seq int, b []byte) {
-			_ = cn.send(protocol.Output{
-				Type:      protocol.TypeOutput,
-				SessionID: id,
-				Data:      base64.StdEncoding.EncodeToString(b),
-				Seq:       seq,
-			})
+			s.deliverOutput(id, seq, b)
 			if shim.DetectNeedsInput(b) {
-				cn.writeEvent(id, protocol.EventNeedsInput, nil)
+				s.deliverEvent(id, protocol.EventNeedsInput, nil)
 			}
 		},
 		func(code int) {
 			c := code
-			cn.writeEvent(id, protocol.EventExited, &c)
-			cn.srv.removeSession(id)
+			s.deliverEvent(id, protocol.EventExited, &c)
+			s.removeSession(id)
 			log.Printf("exited %s (code=%d)", id, code)
 		},
 	)
 }
 
-func (cn *conn) writeEvent(id, event string, code *int) {
-	_ = cn.send(protocol.Event{
-		Type:      protocol.TypeEvent,
-		SessionID: id,
-		Event:     event,
-		ExitCode:  code,
-		At:        time.Now().UTC().Format(time.RFC3339),
+func (cn *conn) handleAttach(raw json.RawMessage) {
+	var msg protocol.Attach
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		cn.sendError("", "bad_message", "malformed attach")
+		return
+	}
+	e := cn.srv.entry(msg.SessionID)
+	if e == nil {
+		// Session is gone (relay restarted, or it exited) — client falls back to FSA replay.
+		_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
+		return
+	}
+	tok, err := config.GenerateToken()
+	if err != nil {
+		cn.sendError(msg.SessionID, protocol.ErrSpawnFailed, "session token generation failed")
+		return
+	}
+	cn.srv.reissueToken(msg.SessionID, tok)
+	e.setSub(cn)
+	_ = cn.send(protocol.Attached{
+		Type:         protocol.TypeAttached,
+		SessionID:    msg.SessionID,
+		SessionToken: tok,
+		Agent:        e.agent,
+		StartedAt:    e.startedAt.UTC().Format(time.RFC3339),
+		PID:          e.pid,
 	})
+	if buf := e.sess.Buffer(); len(buf) > 0 {
+		_ = cn.send(protocol.Output{Type: protocol.TypeOutput, SessionID: msg.SessionID, Data: base64.StdEncoding.EncodeToString(buf), Seq: -1})
+	}
+	log.Printf("reattached %s", msg.SessionID)
 }
 
 func (cn *conn) handleInput(raw json.RawMessage) {

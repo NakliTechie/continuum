@@ -33,8 +33,12 @@ type Session struct {
 
 	mu     sync.Mutex
 	seq    int
+	tail   []byte // recent output, capped, replayed when a client (re)attaches
 	closed bool
 }
+
+// maxTail bounds the in-memory replay buffer per session.
+const maxTail = 256 * 1024
 
 // Start spawns cmd attached to a new PTY and opens the capture file
 // (best-effort — capture failure does not fail the spawn).
@@ -72,6 +76,10 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 			s.mu.Lock()
 			seq := s.seq
 			s.seq++
+			s.tail = append(s.tail, chunk...)
+			if len(s.tail) > maxTail {
+				s.tail = s.tail[len(s.tail)-maxTail:]
+			}
 			s.mu.Unlock()
 			if s.cap != nil {
 				_, _ = s.cap.Write(chunk)
@@ -92,6 +100,15 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 	}
 	s.closeFiles()
 	onExit(code)
+}
+
+// Buffer returns a copy of the recent output, for replay when a client attaches.
+func (s *Session) Buffer() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]byte, len(s.tail))
+	copy(out, s.tail)
+	return out
 }
 
 // Write sends input bytes to the PTY.
