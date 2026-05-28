@@ -1,0 +1,32 @@
+# Menagerie relay configuration — annotated example.
+# `menagerie-relay init` generates the real file at ~/.menagerie/relay.toml.
+
+# Human-readable name shown in the Menagerie relay registry.
+name = "m4pro-home"
+
+# Address to listen on. 127.0.0.1 = local only (default, safest).
+# Use "0.0.0.0:7878" to accept connections from other hosts — set TLS too if you do.
+listen = "127.0.0.1:7878"
+
+# Optional TLS. If both are set, the relay serves WSS instead of WS.
+tls_cert = ""
+tls_key = ""
+
+# Opaque registration token. Clients paste this to register. Keep it secret;
+# rotate with `menagerie-relay token rotate`.
+registration_token = "REPLACE_WITH_GENERATED_TOKEN"
+
+# Origins allowed to open a WebSocket (the origin check is the gate).
+# "null" covers a file:// page during local dev.
+allowed_origins = ["https://menagerie.naklitechie.com", "null"]
+
+# Agents this relay can spawn. The table key is the id the browser shows
+# (alphabetical, no agent featured); `command` is the executable (PATH lookup).
+# The "custom" shim takes its command from spawn.args, so it needs no `command`.
+[agents.claude-code]
+command = "claude"
+
+[agents.mini]
+command = "mini"
+
+[agents.custom]

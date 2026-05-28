@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Menagerie relay — macOS launchd LaunchAgent.
+
+     Install:
+       cp menagerie-relay /usr/local/bin/
+       cp com.naklitechie.menagerie-relay.plist ~/Library/LaunchAgents/
+       launchctl load -w ~/Library/LaunchAgents/com.naklitechie.menagerie-relay.plist
+
+     Run `menagerie-relay init` once first to create ~/.menagerie/relay.toml.
+     Adjust the binary path below if you installed it elsewhere. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.naklitechie.menagerie-relay</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/menagerie-relay</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/menagerie-relay.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/menagerie-relay.log</string>
+</dict>
+</plist>

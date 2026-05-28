@@ -1,0 +1,23 @@
+# Menagerie relay — systemd user service (Linux).
+#
+# Install:
+#   cp menagerie-relay ~/.local/bin/
+#   mkdir -p ~/.config/systemd/user
+#   cp menagerie-relay.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now menagerie-relay
+#
+# (Run `menagerie-relay init` once first to create ~/.menagerie/relay.toml.)
+
+[Unit]
+Description=Menagerie relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/menagerie-relay serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
