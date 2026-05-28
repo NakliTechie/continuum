@@ -53,7 +53,12 @@ func Default() (*Config, error) {
 		Name:              host,
 		Listen:            "127.0.0.1:7878",
 		RegistrationToken: tok,
-		AllowedOrigins:    []string{"https://menagerie.naklitechie.com", "null"},
+		// Origin is the gate. We deliberately do NOT default-allow "null":
+		// browsers send Origin: null not only for file:// pages but for any
+		// sandboxed iframe, so allowing it would let any website pass the gate.
+		// Add "null" (or a "http://localhost:PORT" dev origin) by hand only when
+		// doing local file:// development.
+		AllowedOrigins: []string{"https://menagerie.naklitechie.com"},
 		Agents: map[string]Agent{
 			"mini":        {Command: "mini"},
 			"claude-code": {Command: "claude"},
