@@ -22,11 +22,12 @@ type Shim interface {
 
 // NewRegistry returns the shims implemented in this build, keyed by agent id.
 // `commands` maps an agent id to its configured executable (empty => shim
-// default). claude-code lands in P5.
+// default).
 func NewRegistry(commands map[string]string) map[string]Shim {
 	return map[string]Shim{
-		"mini":   Mini{Cmd: commands["mini"]},
-		"custom": Custom{},
+		"mini":        Mini{Cmd: commands["mini"]},
+		"claude-code": ClaudeCode{Cmd: commands["claude-code"]},
+		"custom":      Custom{},
 	}
 }
 
