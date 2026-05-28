@@ -14,9 +14,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -166,6 +168,12 @@ func (s *Server) deliverEvent(id, event string, code *int) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	// A plain browser visit (no Upgrade header) gets a friendly info page,
+	// not a cryptic WebSocket-protocol error.
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		s.serveInfo(w)
+		return
+	}
 	// Origin check is the gate (§8). Browsers always send Origin; "null" must be
 	// opted in (it also matches sandboxed iframes). Empty Origin = non-browser
 	// client (agent face, §16) → allowed to proceed to token-based register.
@@ -415,6 +423,17 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 	default:
 		cn.sendError(msg.SessionID, "bad_message", "unknown signal: "+msg.Signal)
 	}
+}
+
+// serveInfo answers a non-WebSocket request (e.g. a browser visiting the relay
+// URL) with a friendly plaintext page instead of a protocol error.
+func (s *Server) serveInfo(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "Menagerie relay %q\nprotocol v%s · relay v%s · host %s/%s\n\n"+
+		"This is a WebSocket endpoint, not a web page.\n"+
+		"To use it: open the Menagerie app, Settings -> Add relay, paste this URL\n"+
+		"plus the registration token from `menagerie-relay token print`.\n",
+		s.cfg.Name, protocol.Version, RelayVersion, runtime.GOOS, runtime.GOARCH)
 }
 
 // randomID returns a short hex session id.
