@@ -76,3 +76,51 @@ func endsWithPrompt(buf []byte) bool {
 	}
 	return false
 }
+
+func lastNonEmptyLine(buf []byte) string {
+	lines := strings.Split(string(buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return strings.ToLower(t)
+		}
+	}
+	return ""
+}
+
+// LooksLikeNeedsInput is a generic, conservative "the agent is waiting on you"
+// heuristic applied to every session (not just mini/claude). It deliberately
+// ignores bare shell prompts ($ # >) — those are idle-ready, not a question —
+// and only fires on explicit confirmation / choice / question prompts.
+func LooksLikeNeedsInput(buf []byte) bool {
+	last := lastNonEmptyLine(buf)
+	if last == "" {
+		return false
+	}
+	for _, p := range []string{
+		"(y/n)", "[y/n]", "(yes/no)", "y/n?", "yes/no", "[y/n/a]", "(y/n/a)",
+		"press enter", "press any key", "continue?", "proceed?", "overwrite?",
+		"do you want", "are you sure", "confirm",
+	} {
+		if strings.Contains(last, p) {
+			return true
+		}
+	}
+	// inquirer-style selector (caret can lead the line, often after ANSI color
+	// codes, so match anywhere) or a trailing question.
+	return strings.Contains(last, "❯") || strings.Contains(last, "›") || strings.HasSuffix(last, "?")
+}
+
+// LooksLikeRateLimited flags provider rate-limit / quota messages in output.
+func LooksLikeRateLimited(buf []byte) bool {
+	s := strings.ToLower(string(buf))
+	for _, p := range []string{
+		"rate limit", "rate-limit", "too many requests", "retry-after",
+		"retry after", "quota exceeded", "usage limit", "overloaded",
+		"you've hit your", "try again later",
+	} {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}

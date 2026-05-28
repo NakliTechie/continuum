@@ -340,8 +340,11 @@ func (cn *conn) handleSpawn(raw json.RawMessage) {
 	go sess.Run(
 		func(seq int, b []byte) {
 			s.deliverOutput(id, seq, b)
-			if shim.DetectNeedsInput(b) {
+			// Generic, conservative activity heuristics applied to every session.
+			if shims.LooksLikeNeedsInput(b) {
 				s.deliverEvent(id, protocol.EventNeedsInput, nil)
+			} else if shims.LooksLikeRateLimited(b) {
+				s.deliverEvent(id, protocol.EventRateLimited, nil)
 			}
 		},
 		func(code int) {
