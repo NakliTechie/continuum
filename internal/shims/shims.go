@@ -8,6 +8,7 @@ package shims
 import (
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -108,6 +109,58 @@ func LooksLikeNeedsInput(buf []byte) bool {
 	// inquirer-style selector (caret can lead the line, often after ANSI color
 	// codes, so match anywhere) or a trailing question.
 	return strings.Contains(last, "❯") || strings.Contains(last, "›") || strings.HasSuffix(last, "?")
+}
+
+// ansiRE matches ANSI/VT escape sequences (colors, cursor moves) so the loop
+// detector compares the visible text, not the styling.
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+// LooksLikeStalled flags a "stuck in a loop" signature: within the recent output
+// lines, one non-trivial line repeats many times — an agent re-printing the same
+// error / retrying the same step. Digit runs are collapsed so a timestamped or
+// counter-bearing line still matches; ANSI styling is stripped; short lines
+// (prompts, spinners, dots) are ignored. Conservative: needs several repeats.
+func LooksLikeStalled(recent []string) bool {
+	const window, minLen, minRepeat = 24, 12, 6
+	if len(recent) < minRepeat {
+		return false
+	}
+	start := 0
+	if len(recent) > window {
+		start = len(recent) - window
+	}
+	counts := make(map[string]int)
+	for _, raw := range recent[start:] {
+		l := normalizeLoopLine(raw)
+		if len(l) < minLen {
+			continue // ignore trivial lines
+		}
+		counts[l]++
+		if counts[l] >= minRepeat {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeLoopLine strips ANSI, trims, and collapses digit runs to "#" so that
+// otherwise-identical lines differing only by a timestamp/counter still match.
+func normalizeLoopLine(l string) string {
+	l = strings.TrimSpace(ansiRE.ReplaceAllString(l, ""))
+	var b strings.Builder
+	inDigits := false
+	for _, r := range l {
+		if r >= '0' && r <= '9' {
+			if !inDigits {
+				b.WriteByte('#')
+			}
+			inDigits = true
+			continue
+		}
+		inDigits = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // LooksLikeRateLimited flags provider rate-limit / quota messages in output.

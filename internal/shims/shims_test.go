@@ -51,3 +51,46 @@ func TestLooksLikeRateLimited(t *testing.T) {
 		})
 	}
 }
+
+func repeat(line string, n int) []string {
+	out := make([]string, 0, n+4)
+	out = append(out, "starting up", "reading files")
+	for i := 0; i < n; i++ {
+		out = append(out, line)
+	}
+	return out
+}
+
+func TestLooksLikeStalled(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"identical error looping", repeat("Error: ECONNRESET, retrying connection to api", 8), true},
+		{"timestamped retry loop", []string{
+			"[12:00:01] retrying request to https://api.example.com",
+			"[12:00:04] retrying request to https://api.example.com",
+			"[12:00:07] retrying request to https://api.example.com",
+			"[12:00:10] retrying request to https://api.example.com",
+			"[12:00:13] retrying request to https://api.example.com",
+			"[12:00:16] retrying request to https://api.example.com",
+			"[12:00:19] retrying request to https://api.example.com",
+		}, true},
+		{"ansi-styled loop still caught", repeat("\x1b[31mError:\x1b[0m tool call failed, trying again now", 7), true},
+		{"healthy varied progress", []string{
+			"Reading src/app.ts", "Editing src/app.ts", "Running tests",
+			"3 passed", "Reading src/api.ts", "Editing src/api.ts", "Committing changes",
+		}, false},
+		{"short repeated lines ignored (spinner)", repeat("...", 12), false},
+		{"only a few repeats", repeat("processing the next batch of records", 3), false},
+		{"empty", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := LooksLikeStalled(c.lines); got != c.want {
+				t.Errorf("LooksLikeStalled(%v) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}

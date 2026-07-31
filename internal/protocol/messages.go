@@ -56,6 +56,7 @@ const (
 	EventNeedsInput   = "needs_input"
 	EventChildSpawned = "child_spawned"
 	EventRateLimited  = "rate_limited" // protocol 1.1: generic provider rate-limit signal
+	EventStalled      = "stalled"      // recent output keeps repeating — likely stuck in a loop
 )
 
 // Envelope peeks at a message's discriminator before full decoding.

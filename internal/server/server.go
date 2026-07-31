@@ -45,6 +45,10 @@ type sessionEntry struct {
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
+
+	detMu      sync.Mutex
+	recentText []byte // rolling recent output for the loop detector (capped)
+	stalled    bool   // stalled event already fired; cleared on user input
 }
 
 func (e *sessionEntry) setSub(cn *conn) { e.subMu.Lock(); e.sub = cn; e.subMu.Unlock() }
@@ -179,6 +183,7 @@ func (s *Server) runSession(id string, sess *pty.Session) {
 			} else if shims.LooksLikeRateLimited(b) {
 				s.deliverEvent(id, protocol.EventRateLimited, nil)
 			}
+			s.checkStall(id, b)
 		},
 		func(code int) {
 			c := code
@@ -187,6 +192,32 @@ func (s *Server) runSession(id string, sess *pty.Session) {
 			log.Printf("exited %s (code=%d)", id, code)
 		},
 	)
+}
+
+// checkStall feeds output into the per-session loop detector and fires a single
+// `stalled` event when recent output starts repeating (a likely loop). Unlike the
+// other heuristics it isn't cleared by more output — a loop keeps printing — so it
+// stays until the client sends input (handleInput resets it) or the session exits.
+func (s *Server) checkStall(id string, chunk []byte) {
+	const maxRecent = 8 * 1024
+	e := s.entry(id)
+	if e == nil {
+		return
+	}
+	e.detMu.Lock()
+	e.recentText = append(e.recentText, chunk...)
+	if len(e.recentText) > maxRecent {
+		e.recentText = e.recentText[len(e.recentText)-maxRecent:]
+	}
+	fire := false
+	if !e.stalled && shims.LooksLikeStalled(strings.Split(string(e.recentText), "\n")) {
+		e.stalled, fire = true, true
+	}
+	e.detMu.Unlock()
+	if fire {
+		s.deliverEvent(id, protocol.EventStalled, nil)
+		log.Printf("stalled %s (repeating output)", id)
+	}
 }
 
 // detach clears any session subscription pointing at a closing connection.
@@ -489,6 +520,13 @@ func (cn *conn) handleInput(raw json.RawMessage) {
 	if !ok {
 		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
 		return
+	}
+	// User acted — clear any stall flag so a fresh loop can be detected later.
+	if e := cn.srv.entry(msg.SessionID); e != nil {
+		e.detMu.Lock()
+		e.stalled = false
+		e.recentText = nil
+		e.detMu.Unlock()
 	}
 	if err := sess.Write([]byte(msg.Data)); err != nil {
 		log.Printf("input write %s: %v", msg.SessionID, err)
