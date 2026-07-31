@@ -4,10 +4,12 @@
 //
 // Usage:
 //
-//	menagerie-relay init          generate ~/.menagerie/relay.toml + a token
-//	menagerie-relay serve         start the relay (default if config exists)
-//	menagerie-relay token print   re-print the registration token
-//	menagerie-relay token rotate  generate a new registration token
+//	menagerie-relay serve            start the relay (creates config on first run;
+//	                                 copies the registration token to the clipboard)
+//	menagerie-relay service install  run the relay always-on (launchd / systemd)
+//	menagerie-relay init             generate ~/.menagerie/relay.toml + a token only
+//	menagerie-relay token print      re-print the registration token
+//	menagerie-relay token rotate     generate a new registration token
 package main
 
 import (
@@ -46,6 +48,8 @@ func main() {
 		cmdServe(path)
 	case "token":
 		cmdToken(path, args[1:])
+	case "service":
+		cmdService(path, args[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -69,21 +73,17 @@ func cmdInit(path string) {
 	fmt.Printf("Created %s\n", path)
 	fmt.Printf("Relay name: %s\n", cfg.Name)
 	fmt.Printf("Listening:  %s  (edit to 0.0.0.0:PORT to expose beyond localhost)\n\n", cfg.Listen)
-	fmt.Println("Registration token — paste into Menagerie → Settings → Add relay:")
-	fmt.Printf("  %s\n\n", cfg.RegistrationToken)
-	fmt.Println("Then run `menagerie-relay serve`.")
+	announceToken(cfg.RegistrationToken)
+	fmt.Println("Then run `menagerie-relay serve` (or `menagerie-relay service install` to keep it always-on).")
 }
 
 func cmdServe(path string) {
-	if !config.Exists(path) {
-		fatalf("no config at %s — run `menagerie-relay init` first", path)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		fatal(err)
-	}
+	cfg := ensureConfig(path) // creates config on first run so `serve` is the only command needed
 	if cfg.RegistrationToken == "" {
 		fatalf("config has an empty registration_token — run `menagerie-relay token rotate`")
+	}
+	if isInteractive() {
+		announceToken(cfg.RegistrationToken)
 	}
 
 	httpSrv := &http.Server{
@@ -127,7 +127,11 @@ func cmdToken(path string, args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Println(cfg.RegistrationToken)
+		if isInteractive() {
+			announceToken(cfg.RegistrationToken) // copies to clipboard for a human
+		} else {
+			fmt.Println(cfg.RegistrationToken) // bare, pipe-friendly
+		}
 	case "rotate":
 		cfg, err := config.Load(path)
 		if err != nil {
@@ -152,10 +156,17 @@ func usage() {
 	fmt.Fprint(os.Stderr, `menagerie-relay — a Menagerie relay
 
 Usage:
-  menagerie-relay init           generate ~/.menagerie/relay.toml + a registration token
-  menagerie-relay serve          start the relay (default when a config exists)
-  menagerie-relay token print    re-print the registration token
-  menagerie-relay token rotate   generate a new registration token (invalidates the old)
+  menagerie-relay serve             start the relay (default). Creates the config on
+                                    first run and copies the registration token to
+                                    your clipboard — just paste it into Menagerie.
+  menagerie-relay service install   run the relay always-on: starts at login and
+                                    restarts if it exits (launchd on macOS,
+                                    systemd --user on Linux)
+  menagerie-relay service uninstall remove the always-on service
+  menagerie-relay service status    is the always-on service running?
+  menagerie-relay init              write the config + token only (no serve)
+  menagerie-relay token print       re-print (and copy) the registration token
+  menagerie-relay token rotate      generate a new registration token (invalidates the old)
 `)
 }
 
