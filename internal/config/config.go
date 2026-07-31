@@ -39,6 +39,10 @@ type Config struct {
 	// Tmux controls whether agents run inside a tmux session so they survive a
 	// relay restart: "auto" (use tmux if installed — default), "on", or "off".
 	Tmux string `toml:"tmux"`
+	// AdoptForeignTmux, when true, also surfaces tmux sessions you started
+	// yourself (e.g. `tmux new -s grok`) as tiles — not just Menagerie's own.
+	// Off by default so unrelated tmux sessions don't show up.
+	AdoptForeignTmux bool `toml:"adopt_foreign_tmux"`
 }
 
 // Default returns a fresh config with a generated registration token and the

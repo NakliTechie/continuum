@@ -17,6 +17,10 @@ tls_key = ""
 #   "auto" — use tmux when it's installed (default)   "on" — require it   "off" — never
 tmux = "auto"
 
+# Also surface tmux sessions you started yourself (e.g. `tmux new -s grok`) as
+# tiles — not just Menagerie's own. Off by default so unrelated sessions stay hidden.
+adopt_foreign_tmux = false
+
 # Opaque registration token. Clients paste this to register. Keep it secret;
 # rotate with `menagerie-relay token rotate`.
 registration_token = "REPLACE_WITH_GENERATED_TOKEN"

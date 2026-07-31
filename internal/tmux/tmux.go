@@ -93,8 +93,12 @@ func Exists(name string) bool {
 	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
 }
 
-// List returns the Menagerie-owned tmux sessions currently alive. It lists names
-// only (no delimiter to mangle), then queries each session's agent + created time.
+// IsMenagerie reports whether this is a session Menagerie itself created.
+func (s Session) IsMenagerie() bool { return strings.HasPrefix(s.Name, NamePrefix) }
+
+// List returns every tmux session currently alive (the caller decides which to
+// adopt). It lists names only (no delimiter to mangle), then queries each
+// session's Menagerie agent tag + created time.
 func List() []Session {
 	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
@@ -103,8 +107,8 @@ func List() []Session {
 	var res []Session
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		name = strings.TrimSpace(name)
-		if !strings.HasPrefix(name, NamePrefix) {
-			continue // not ours
+		if name == "" {
+			continue
 		}
 		s := Session{Name: name, Agent: getOption(name, agentOption)}
 		if c := display(name, "#{session_created}"); c != "" {

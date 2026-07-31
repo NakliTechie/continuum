@@ -147,29 +147,49 @@ func (s *Server) useTmux() bool {
 	}
 }
 
-// reconcileTmux adopts any `menagerie-*` tmux sessions not already tracked — this
-// is what re-surfaces running agents after the relay process itself restarts.
-// Adopted entries are lazy (no PTY) until a client attaches.
+// reconcileTmux adopts tmux sessions not already tracked. Menagerie's own
+// `menagerie-*` sessions are always adopted (this is what re-surfaces agents
+// after the relay itself restarts); sessions you started yourself are adopted
+// only when adopt_foreign_tmux is on. Adopted entries are lazy (no PTY) until a
+// client attaches.
 func (s *Server) reconcileTmux() {
 	if !s.useTmux() {
 		return
 	}
 	for _, ts := range tmux.List() {
-		id, ok := tmux.IDFromName(ts.Name)
-		if !ok {
-			continue
-		}
-		s.mu.Lock()
-		if s.sessions[id] == nil {
-			agent := ts.Agent
+		var id, agent string
+		if mid, ok := tmux.IDFromName(ts.Name); ok {
+			id, agent = mid, ts.Agent
 			if agent == "" {
 				agent = "tmux"
 			}
+		} else if s.cfg.AdoptForeignTmux {
+			id, agent = "ext-"+sanitizeID(ts.Name), ts.Name // show the session name as the agent
+		} else {
+			continue // a foreign session, and adoption is off
+		}
+		s.mu.Lock()
+		if s.sessions[id] == nil {
 			s.sessions[id] = &sessionEntry{agent: agent, startedAt: ts.Created, tmuxName: ts.Name}
-			log.Printf("adopted tmux session %s (agent=%s)", id, agent)
+			log.Printf("adopted tmux session %s (name=%s agent=%s)", id, ts.Name, agent)
 		}
 		s.mu.Unlock()
 	}
+}
+
+// sanitizeID makes a tmux session name safe to use as a session id (map key +
+// FSA capture filename): only [A-Za-z0-9_-] survive.
+func sanitizeID(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // runSession pumps a session's PTY output (+ generic activity heuristics) to its
