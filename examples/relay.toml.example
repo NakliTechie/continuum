@@ -12,6 +12,11 @@ listen = "127.0.0.1:7878"
 tls_cert = ""
 tls_key = ""
 
+# Run agents inside tmux so they survive the relay restarting (the relay just
+# attaches a PTY; on restart it re-adopts its `menagerie-*` sessions).
+#   "auto" — use tmux when it's installed (default)   "on" — require it   "off" — never
+tmux = "auto"
+
 # Opaque registration token. Clients paste this to register. Keep it secret;
 # rotate with `menagerie-relay token rotate`.
 registration_token = "REPLACE_WITH_GENERATED_TOKEN"

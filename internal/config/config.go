@@ -36,6 +36,9 @@ type Config struct {
 	RegistrationToken string           `toml:"registration_token"`
 	AllowedOrigins    []string         `toml:"allowed_origins"`
 	Agents            map[string]Agent `toml:"agents"`
+	// Tmux controls whether agents run inside a tmux session so they survive a
+	// relay restart: "auto" (use tmux if installed — default), "on", or "off".
+	Tmux string `toml:"tmux"`
 }
 
 // Default returns a fresh config with a generated registration token and the
@@ -52,6 +55,7 @@ func Default() (*Config, error) {
 	return &Config{
 		Name:              host,
 		Listen:            "127.0.0.1:7878",
+		Tmux:              "auto",
 		RegistrationToken: tok,
 		// Origin is the gate. We deliberately do NOT default-allow "null":
 		// browsers send Origin: null not only for file:// pages but for any

@@ -29,6 +29,7 @@ import (
 	"github.com/NakliTechie/menagerie/relay-go/internal/protocol"
 	"github.com/NakliTechie/menagerie/relay-go/internal/pty"
 	"github.com/NakliTechie/menagerie/relay-go/internal/shims"
+	"github.com/NakliTechie/menagerie/relay-go/internal/tmux"
 )
 
 // RelayVersion is reported in the hello message.
@@ -36,10 +37,11 @@ const RelayVersion = "0.1.0"
 
 type sessionEntry struct {
 	token     string
-	sess      *pty.Session
+	sess      *pty.Session // nil for a tmux session adopted-but-not-yet-attached
 	agent     string
 	startedAt time.Time
 	pid       int
+	tmuxName  string // non-empty when the agent runs inside a tmux session
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
@@ -126,6 +128,65 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid})
 	}
 	return out
+}
+
+// useTmux reports whether new agents should run inside tmux (so they survive a
+// relay restart). "auto" uses tmux when it's installed.
+func (s *Server) useTmux() bool {
+	switch s.cfg.Tmux {
+	case "on":
+		return true
+	case "off":
+		return false
+	default:
+		return tmux.Available()
+	}
+}
+
+// reconcileTmux adopts any `menagerie-*` tmux sessions not already tracked — this
+// is what re-surfaces running agents after the relay process itself restarts.
+// Adopted entries are lazy (no PTY) until a client attaches.
+func (s *Server) reconcileTmux() {
+	if !s.useTmux() {
+		return
+	}
+	for _, ts := range tmux.List() {
+		id, ok := tmux.IDFromName(ts.Name)
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		if s.sessions[id] == nil {
+			agent := ts.Agent
+			if agent == "" {
+				agent = "tmux"
+			}
+			s.sessions[id] = &sessionEntry{agent: agent, startedAt: ts.Created, tmuxName: ts.Name}
+			log.Printf("adopted tmux session %s (agent=%s)", id, agent)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// runSession pumps a session's PTY output (+ generic activity heuristics) to its
+// subscriber and handles exit. Shared by fresh spawns and adopted attaches.
+func (s *Server) runSession(id string, sess *pty.Session) {
+	go sess.Run(
+		func(seq int, b []byte) {
+			s.deliverOutput(id, seq, b)
+			if shims.LooksLikeNeedsInput(b) {
+				s.deliverEvent(id, protocol.EventNeedsInput, nil)
+			} else if shims.LooksLikeRateLimited(b) {
+				s.deliverEvent(id, protocol.EventRateLimited, nil)
+			}
+		},
+		func(code int) {
+			c := code
+			s.deliverEvent(id, protocol.EventExited, &c)
+			s.removeSession(id)
+			log.Printf("exited %s (code=%d)", id, code)
+		},
+	)
 }
 
 // detach clears any session subscription pointing at a closing connection.
@@ -291,7 +352,9 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 	}
 	cn.registered = true
 	_ = cn.send(protocol.Registered{Type: protocol.TypeRegistered})
-	// Advertise live sessions so a reconnecting client can re-attach (1.1).
+	// Re-adopt any tmux-backed agents that outlived a relay restart, then advertise
+	// all live sessions so the client re-attaches (1.1).
+	cn.srv.reconcileTmux()
 	_ = cn.send(protocol.Sessions{Type: protocol.TypeSessions, Sessions: cn.srv.listSessions()})
 	log.Printf("client registered")
 }
@@ -313,19 +376,39 @@ func (cn *conn) handleSpawn(raw json.RawMessage) {
 		return
 	}
 	id := randomID()
+	s := cn.srv
+
+	// When tmux is in play the agent runs inside a detached tmux session (so it
+	// outlives a relay restart) and our PTY just attaches to it.
+	tmuxName := ""
+	if s.useTmux() {
+		tmuxName = tmux.SessionName(id)
+		if err := tmux.Create(tmuxName, cmd.Dir, cmd.Env, cmd.Args); err != nil {
+			cn.sendError("", protocol.ErrSpawnFailed, "tmux create: "+err.Error())
+			return
+		}
+		tmux.SetAgent(tmuxName, msg.Agent)
+		cmd = tmux.AttachCmd(tmuxName)
+	}
+
 	sess, err := pty.Start(id, msg.Agent, cmd)
 	if err != nil {
+		if tmuxName != "" {
+			_ = tmux.Kill(tmuxName)
+		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
 		return
 	}
 	token, err := config.GenerateToken()
 	if err != nil {
 		sess.Kill()
+		if tmuxName != "" {
+			_ = tmux.Kill(tmuxName)
+		}
 		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
-	s := cn.srv
-	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn}, id)
+	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName}, id)
 	_ = cn.send(protocol.Spawned{
 		Type:         protocol.TypeSpawned,
 		SessionID:    id,
@@ -335,25 +418,8 @@ func (cn *conn) handleSpawn(raw json.RawMessage) {
 		PID:          sess.PID,
 		StartedAt:    sess.StartedAt.UTC().Format(time.RFC3339),
 	})
-	log.Printf("spawned %s (agent=%s pid=%d)", id, msg.Agent, sess.PID)
-
-	go sess.Run(
-		func(seq int, b []byte) {
-			s.deliverOutput(id, seq, b)
-			// Generic, conservative activity heuristics applied to every session.
-			if shims.LooksLikeNeedsInput(b) {
-				s.deliverEvent(id, protocol.EventNeedsInput, nil)
-			} else if shims.LooksLikeRateLimited(b) {
-				s.deliverEvent(id, protocol.EventRateLimited, nil)
-			}
-		},
-		func(code int) {
-			c := code
-			s.deliverEvent(id, protocol.EventExited, &c)
-			s.removeSession(id)
-			log.Printf("exited %s (code=%d)", id, code)
-		},
-	)
+	log.Printf("spawned %s (agent=%s pid=%d tmux=%q)", id, msg.Agent, sess.PID, tmuxName)
+	s.runSession(id, sess)
 }
 
 func (cn *conn) handleAttach(raw json.RawMessage) {
@@ -367,6 +433,30 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 		// Session is gone (relay restarted, or it exited) — client falls back to FSA replay.
 		_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
 		return
+	}
+	// A tmux session adopted after a relay restart has no PTY yet — attach one now.
+	// tmux redraws the pane on attach, so the client sees current state immediately.
+	if e.sess == nil {
+		if e.tmuxName == "" || !tmux.Exists(e.tmuxName) {
+			cn.srv.removeSession(msg.SessionID)
+			_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
+			return
+		}
+		sess, err := pty.Start(msg.SessionID, e.agent, tmux.AttachCmd(e.tmuxName))
+		if err != nil {
+			cn.sendError(msg.SessionID, protocol.ErrSpawnFailed, err.Error())
+			return
+		}
+		cn.srv.mu.Lock()
+		if e.sess == nil {
+			e.sess = sess
+			e.pid = sess.PID
+			cn.srv.mu.Unlock()
+			cn.srv.runSession(msg.SessionID, sess)
+		} else {
+			cn.srv.mu.Unlock()
+			sess.Kill() // lost a race with a concurrent attach — keep the first PTY
+		}
 	}
 	tok, err := config.GenerateToken()
 	if err != nil {
@@ -416,11 +506,20 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
 		return
 	}
+	e := cn.srv.entry(msg.SessionID)
+	inTmux := e != nil && e.tmuxName != ""
 	switch msg.Signal {
 	case protocol.SignalKill:
+		if inTmux {
+			_ = tmux.Kill(e.tmuxName) // ends the agent + its tmux session; the PTY then EOFs
+		}
 		sess.Kill()
 	case protocol.SignalInterrupt:
-		sess.Interrupt()
+		if inTmux {
+			_ = sess.Write([]byte{0x03}) // ^C through the attach PTY — SIGINT to the client would only detach
+		} else {
+			sess.Interrupt()
+		}
 	case protocol.SignalResize:
 		_ = sess.Resize(msg.Cols, msg.Rows)
 	default:
