@@ -4,6 +4,8 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,6 +45,10 @@ type Config struct {
 	// yourself (e.g. `tmux new -s grok`) as tiles — not just Menagerie's own.
 	// Off by default so unrelated tmux sessions don't show up.
 	AdoptForeignTmux bool `toml:"adopt_foreign_tmux"`
+	// AllowLocalhostOrigins: for a loopback-bound relay, also accept
+	// http(s)://localhost|127.0.0.1|[::1] origins so a local dev/preview server
+	// just works. nil (unset) = on; set false to require an explicit allowlist.
+	AllowLocalhostOrigins *bool `toml:"allow_localhost_origins"`
 }
 
 // Default returns a fresh config with a generated registration token and the
@@ -104,7 +110,46 @@ func (c *Config) OriginAllowed(origin string) bool {
 			return true
 		}
 	}
+	// Convenience for a purely-local relay: when it's bound to loopback, also accept
+	// http(s)://localhost|127.0.0.1|[::1] origins (any port), so a local dev/preview
+	// server connects without editing the allowlist. A real website's origin can never
+	// match this — only a page actually served from loopback can — so the gate holds.
+	// Opt out with `allow_localhost_origins = false`.
+	if c.allowLocalhostOrigins() && listenIsLoopback(c.Listen) && isLoopbackOrigin(origin) {
+		return true
+	}
 	return false
+}
+
+func (c *Config) allowLocalhostOrigins() bool {
+	return c.AllowLocalhostOrigins == nil || *c.AllowLocalhostOrigins
+}
+
+// listenIsLoopback reports whether the relay's listen address is a loopback host.
+func listenIsLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackOrigin reports whether origin is an http(s) page served from loopback.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Load reads a config from path.

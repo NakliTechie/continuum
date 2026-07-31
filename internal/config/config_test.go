@@ -39,6 +39,31 @@ func TestOriginAllowed(t *testing.T) {
 	}
 }
 
+func TestOriginAllowedLocalhost(t *testing.T) {
+	// A loopback-bound relay auto-allows localhost / 127.0.0.1 / [::1] origins…
+	lo := &Config{Listen: "127.0.0.1:7878", AllowedOrigins: []string{"https://menagerie.naklitechie.com"}}
+	for _, ok := range []string{"http://localhost:8077", "http://127.0.0.1:3000", "https://localhost:5173", "http://[::1]:9000"} {
+		if !lo.OriginAllowed(ok) {
+			t.Errorf("loopback relay should allow local origin %q", ok)
+		}
+	}
+	// …but never a real site (even one that starts with "localhost"), nor null/empty.
+	for _, bad := range []string{"https://evil.example", "http://localhost.evil.com", "http://notlocalhost", "null", ""} {
+		if lo.OriginAllowed(bad) {
+			t.Errorf("loopback relay should still deny %q", bad)
+		}
+	}
+	// A relay exposed on 0.0.0.0 does NOT auto-allow localhost origins.
+	if (&Config{Listen: "0.0.0.0:7878"}).OriginAllowed("http://localhost:8077") {
+		t.Error("exposed relay must not auto-allow localhost origins")
+	}
+	// Opt-out disables it even on loopback.
+	no := false
+	if (&Config{Listen: "127.0.0.1:7878", AllowLocalhostOrigins: &no}).OriginAllowed("http://localhost:8077") {
+		t.Error("allow_localhost_origins=false must disable the convenience")
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "relay.toml")
 	want, err := Default()

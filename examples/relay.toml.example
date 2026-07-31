@@ -26,10 +26,15 @@ adopt_foreign_tmux = false
 registration_token = "REPLACE_WITH_GENERATED_TOKEN"
 
 # Origins allowed to open a WebSocket (the origin check is the gate).
-# Add "http://localhost:PORT" if you serve the app locally during dev.
+# A loopback-bound relay (see `listen`) already accepts http(s)://localhost |
+# 127.0.0.1 | [::1] on any port, so you rarely need to add a local dev origin here.
 # Avoid "null": it matches file:// pages but ALSO any sandboxed iframe on any
 # website, which weakens the gate — only add it for short-lived file:// dev.
 allowed_origins = ["https://menagerie.naklitechie.com"]
+
+# Auto-allow localhost origins on a loopback relay (above). true (default) unless set.
+# Set false to require every origin to be listed explicitly.
+allow_localhost_origins = true
 
 # Agents this relay can spawn. The table key is the id the browser shows
 # (alphabetical, no agent featured); `command` is the executable (PATH lookup).

@@ -33,7 +33,7 @@ import (
 )
 
 // RelayVersion is reported in the hello message.
-const RelayVersion = "0.3.0"
+const RelayVersion = "0.4.0"
 
 type sessionEntry struct {
 	token     string
