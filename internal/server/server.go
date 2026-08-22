@@ -804,6 +804,15 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			PID:          e.pid,
 		})
 		for _, b := range e.tailSnapshot() {
+			// Replayed history carries seq -1 (the PTY-attach convention): clients
+			// render it but never re-persist it into their event logs.
+			var su protocol.SessionUpdate
+			if err := json.Unmarshal(b, &su); err == nil && su.Type == protocol.TypeSessionUpdate {
+				su.Seq = -1
+				if nb, err := json.Marshal(su); err == nil {
+					b = nb
+				}
+			}
 			select {
 			case e.outbox <- b:
 			default:
