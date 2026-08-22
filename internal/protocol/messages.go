@@ -1,16 +1,20 @@
 // Package protocol defines the Menagerie relay protocol message types.
 //
-// protocol-v1.0
+// protocol-v1.2
 //
 // This is the Go port of protocol/types.ts, which is the canonical definition.
 // Keep the two in sync — if they disagree, types.ts wins.
 //
-// Transport: WebSocket, JSON text frames only in v1.0. One connection per
-// browser<->relay pair; sessions multiplex via session_id.
+// Transport: WebSocket, JSON text frames. One connection per browser<->relay
+// pair; sessions multiplex via session_id. v1.2 adds structured sessions
+// ("acp"): ACP payloads ride nested inside Menagerie frames as RawMessage and
+// are never interpreted here (see protocol/acp-pin.md).
 package protocol
 
+import "encoding/json"
+
 // Version is the protocol version this relay speaks.
-const Version = "1.1"
+const Version = "1.2"
 
 // Message type discriminators.
 const (
@@ -31,6 +35,25 @@ const (
 	TypeSessions = "sessions"
 	TypeAttach   = "attach"
 	TypeAttached = "attached"
+
+	// protocol 1.2: structured sessions (transport "acp")
+	TypeSessionUpdate      = "session_update"
+	TypePermissionRequest  = "permission_request"
+	TypePermissionResponse = "permission_response"
+	TypePrompt             = "prompt"
+)
+
+// Transports.
+const (
+	TransportPTY = "pty"
+	TransportACP = "acp"
+)
+
+// Permission outcomes for permission_response.
+const (
+	OutcomeApprove       = "approve"
+	OutcomeReject        = "reject"
+	OutcomeApproveAlways = "approve_always" // session-scoped only; never persisted
 )
 
 // Error codes. The set is open-ended (clients must tolerate unknown codes);
@@ -68,15 +91,16 @@ type Envelope struct {
 // ---- Relay -> Browser ----
 
 type Hello struct {
-	Type            string   `json:"type"`
-	ProtocolVersion string   `json:"protocol_version"`
-	RelayVersion    string   `json:"relay_version"`
-	RelayName       string   `json:"relay_name"`
-	HostOS          string   `json:"host_os"`
-	HostArch        string   `json:"host_arch"`
-	Agents          []string `json:"agents"`
-	Transports      []string `json:"transports"`
-	HostsChildren   bool     `json:"hosts_children"`
+	Type            string              `json:"type"`
+	ProtocolVersion string              `json:"protocol_version"`
+	RelayVersion    string              `json:"relay_version"`
+	RelayName       string              `json:"relay_name"`
+	HostOS          string              `json:"host_os"`
+	HostArch        string              `json:"host_arch"`
+	Agents          []string            `json:"agents"`
+	Transports      []string            `json:"transports"`
+	HostsChildren   bool                `json:"hosts_children"`
+	AgentTransports map[string][]string `json:"agent_transports,omitempty"` // protocol 1.2
 }
 
 type Registered struct {
@@ -122,12 +146,13 @@ type Register struct {
 }
 
 type Spawn struct {
-	Type     string            `json:"type"`
-	Agent    string            `json:"agent"`
-	Cwd      string            `json:"cwd"`
-	Args     []string          `json:"args"`
-	Env      map[string]string `json:"env"`
-	ClientID string            `json:"client_id"`
+	Type      string            `json:"type"`
+	Agent     string            `json:"agent"`
+	Cwd       string            `json:"cwd"`
+	Args      []string          `json:"args"`
+	Env       map[string]string `json:"env"`
+	ClientID  string            `json:"client_id"`
+	Transport string            `json:"transport,omitempty"` // protocol 1.2; absent ⇒ pty
 }
 
 type Input struct {
@@ -151,6 +176,47 @@ type Resume struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token"`
 	LastSeq      int    `json:"last_seq"`
+}
+
+// ---- protocol 1.2: structured sessions ----
+
+// SessionUpdate (relay -> browser) wraps ONE ACP agent->client message, verbatim,
+// in Acp. The relay never interprets the payload.
+type SessionUpdate struct {
+	Type      string          `json:"type"`
+	SessionID string          `json:"session_id"`
+	Seq       int             `json:"seq"`
+	Acp       json.RawMessage `json:"acp"`
+}
+
+// PermissionRequest (relay -> browser) surfaces an ACP agent asking to proceed.
+// RequestID is relay-correlated; echo it in PermissionResponse.
+type PermissionRequest struct {
+	Type      string          `json:"type"`
+	SessionID string          `json:"session_id"`
+	RequestID string          `json:"request_id"`
+	Seq       int             `json:"seq"`
+	Acp       json.RawMessage `json:"acp"`
+}
+
+// PermissionResponse (browser -> relay) answers a PermissionRequest.
+// ApproveAlways is session-scoped only — never persisted across sessions.
+type PermissionResponse struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
+	RequestID    string `json:"request_id"`
+	Outcome      string `json:"outcome"`
+	OptionID     string `json:"option_id,omitempty"` // explicit ACP option id when known
+}
+
+// Prompt (browser -> relay) prompts a structured session; the structured
+// analogue of Input. Input stays PTY-only.
+type Prompt struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
+	Text         string `json:"text"`
 }
 
 // ---- Either direction ----
