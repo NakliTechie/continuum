@@ -27,6 +27,39 @@ type Agent struct {
 	// Command is the executable to run (PATH lookup). Empty for the "custom"
 	// shim, which takes its command from spawn.args.
 	Command string `toml:"command"`
+	// Transports this agent supports: any of "pty", "acp". Empty ⇒ ["pty"].
+	// "acp" means the agent speaks the Agent Client Protocol over stdio when
+	// invoked with ACPArgs; nothing is special-cased by agent name anywhere.
+	Transports []string `toml:"transports"`
+	// ACPArgs are appended to Command when spawning transport "acp".
+	// Empty ⇒ ["acp"].
+	ACPArgs []string `toml:"acp_args"`
+}
+
+// TransportsOrDefault returns the agent's transports, defaulting to pty-only.
+func (a Agent) TransportsOrDefault() []string {
+	if len(a.Transports) == 0 {
+		return []string{"pty"}
+	}
+	return a.Transports
+}
+
+// SupportsACP reports whether the agent can serve a structured session.
+func (a Agent) SupportsACP() bool {
+	for _, t := range a.TransportsOrDefault() {
+		if t == "acp" {
+			return true
+		}
+	}
+	return false
+}
+
+// ACPArgsOrDefault returns the argv suffix for an ACP spawn.
+func (a Agent) ACPArgsOrDefault() []string {
+	if len(a.ACPArgs) == 0 {
+		return []string{"acp"}
+	}
+	return a.ACPArgs
 }
 
 // Config mirrors relay.toml.
@@ -77,6 +110,10 @@ func Default() (*Config, error) {
 			"mini":        {Command: "mini"},
 			"claude-code": {Command: "claude"},
 			"custom":      {},
+			// A known ACP-speaking agent ships as a default so structured
+			// sessions work out of the box. This is configuration, not a code
+			// path — nothing anywhere branches on the name "omp".
+			"omp": {Command: "omp", Transports: []string{"acp"}},
 		},
 	}, nil
 }

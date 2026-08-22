@@ -177,3 +177,7 @@ func LooksLikeRateLimited(buf []byte) bool {
 	}
 	return false
 }
+
+// MergeEnv exposes the standard environment assembly (inherit + TERM default +
+// overrides) for non-PTY spawn paths that share the same rules.
+func MergeEnv(env map[string]string) []string { return mergeEnv(env) }
