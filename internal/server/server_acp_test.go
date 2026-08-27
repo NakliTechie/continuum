@@ -320,6 +320,65 @@ func TestChildSpawnLinkage(t *testing.T) {
 	}
 }
 
+// C2: subtree kill (signal{kill, subtree}) tears down the parent and all its
+// children — each emits `exited`. (Kill order is leaf-first; event *arrival* is
+// async, so we assert the set, not the sequence — ordering is covered by the
+// subtreeLeafFirst unit test.)
+func TestSubtreeKillExitsAll(t *testing.T) {
+	ts := acpTestServer(t)
+	c, parentSID, parentTok := registerAndSpawn(t, ts, protocol.TransportACP, nil)
+
+	want := map[string]bool{parentSID: false}
+	for i, cid := range []string{"cid-w1", "cid-w2"} {
+		sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": map[string]string{}, "client_id": cid, "transport": protocol.TransportACP, "parent_session_id": parentSID})
+		sp := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned && f["client_id"] == cid })
+		sid, _ := sp["session_id"].(string)
+		if sid == "" {
+			t.Fatalf("child %d missing session_id", i)
+		}
+		want[sid] = false
+	}
+
+	sendMsg(t, c, msg{"type": "signal", "session_id": parentSID, "session_token": parentTok, "signal": "kill", "subtree": true})
+
+	got := 0
+	for i := 0; i < 200 && got < len(want); i++ {
+		f := recvFrame(t, c)
+		if f["type"] == "event" && f["event"] == "exited" {
+			if sid, _ := f["session_id"].(string); want[sid] == false {
+				if _, tracked := want[sid]; tracked {
+					want[sid] = true
+					got++
+				}
+			}
+		}
+	}
+	if got != len(want) {
+		t.Fatalf("subtree kill: %d/%d sessions exited (%v)", got, len(want), want)
+	}
+}
+
+// subtreeLeafFirst orders a tree deepest-first (children before their parent).
+func TestSubtreeLeafFirstOrder(t *testing.T) {
+	s := &Server{sessions: map[string]*sessionEntry{
+		"root": {},
+		"a":    {parent: "root"},
+		"b":    {parent: "root"},
+		"a1":   {parent: "a"},
+	}}
+	order := s.subtreeLeafFirst("root")
+	pos := map[string]int{}
+	for i, id := range order {
+		pos[id] = i
+	}
+	if len(order) != 4 {
+		t.Fatalf("expected 4 ids, got %v", order)
+	}
+	if pos["a1"] > pos["a"] || pos["a"] > pos["root"] || pos["b"] > pos["root"] {
+		t.Fatalf("not leaf-first: %v", order)
+	}
+}
+
 // A parent_session_id that isn't live spawns at root — never fails the spawn.
 func TestChildSpawnUnknownParentRoots(t *testing.T) {
 	ts := acpTestServer(t)

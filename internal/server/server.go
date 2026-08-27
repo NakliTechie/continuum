@@ -351,6 +351,54 @@ func (s *Server) emitChildSpawned(parentID, childID string) {
 	}
 }
 
+// subtreeLeafFirst returns rootID plus every descendant, deepest first, so a kill
+// tears down leaves before their parents. Snapshotted once under s.mu (later
+// removals during the kill loop don't matter — we already hold the id list).
+func (s *Server) subtreeLeafFirst(rootID string) []string {
+	s.mu.Lock()
+	children := map[string][]string{}
+	for id, e := range s.sessions {
+		if e.parent != "" {
+			children[e.parent] = append(children[e.parent], id)
+		}
+	}
+	s.mu.Unlock()
+	var order []string
+	seen := map[string]bool{}
+	var walk func(id string)
+	walk = func(id string) {
+		if seen[id] {
+			return // defensive: a pathological cycle can't stall the walk
+		}
+		seen[id] = true
+		for _, c := range children[id] {
+			walk(c)
+		}
+		order = append(order, id) // post-order → children before their parent
+	}
+	walk(rootID)
+	return order
+}
+
+// killEntry hard-stops one session by whichever transport it runs on. Each kill
+// drives that session's own exit path (an `exited` event + cleanup).
+func (s *Server) killEntry(id string) {
+	e := s.entry(id)
+	if e == nil {
+		return
+	}
+	if e.acp != nil {
+		e.acp.Kill()
+		return
+	}
+	if e.tmuxName != "" {
+		_ = tmux.Kill(e.tmuxName)
+	}
+	if sess := s.entrySess(e); sess != nil {
+		sess.Kill()
+	}
+}
+
 // deliverEvent routes a lifecycle event to a session's current subscriber.
 func (s *Server) deliverEvent(id, event string, code *int) {
 	e := s.entry(id)
@@ -1098,6 +1146,16 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)
 	if e == nil {
 		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
+		return
+	}
+	// protocol 1.3: kill + subtree tears down this session and every descendant,
+	// leaf-first. Authorized by THIS session's token (the parent owns the subtree).
+	if msg.Signal == protocol.SignalKill && msg.Subtree {
+		ids := cn.srv.subtreeLeafFirst(msg.SessionID)
+		for _, id := range ids {
+			cn.srv.killEntry(id)
+		}
+		log.Printf("subtree kill %s → %d session(s)", msg.SessionID, len(ids))
 		return
 	}
 	if e.acp != nil {
