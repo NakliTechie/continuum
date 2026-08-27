@@ -46,6 +46,7 @@ type sessionEntry struct {
 	startedAt time.Time
 	pid       int
 	tmuxName  string // non-empty when the agent runs inside a tmux session
+	parent    string // protocol 1.3: parent session id (supervisor tree); "" for a root. Guarded by s.mu.
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
@@ -170,7 +171,7 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 		if e.acp != nil {
 			transport = protocol.TransportACP
 		}
-		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport})
+		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport, ParentSessionID: e.parent})
 	}
 	return out
 }
@@ -309,6 +310,47 @@ func (s *Server) deliverOutput(id string, seq int, b []byte) {
 	}
 }
 
+// validParent returns the parent id to record for a NEW session: the requested
+// parent iff it's a live session on this relay, else "" (spawn at root — never fail
+// a spawn over a stale parent, per spec §2). No cycle check is needed: the new
+// session's id doesn't exist yet, so it cannot already be an ancestor of any live
+// session; cycles are only reachable via re-parenting, which the protocol has no frame for.
+func (s *Server) validParent(parentID string) string {
+	if parentID == "" {
+		return ""
+	}
+	s.mu.Lock()
+	_, live := s.sessions[parentID]
+	s.mu.Unlock()
+	if !live {
+		log.Printf("spawn: parent %s not live; spawning at root", parentID)
+		return ""
+	}
+	return parentID
+}
+
+// emitChildSpawned tells the PARENT's owner a child was spawned. Routed to whichever
+// transport the parent uses (PTY → direct subscriber send; ACP → the outbox funnel).
+func (s *Server) emitChildSpawned(parentID, childID string) {
+	if parentID == "" {
+		return
+	}
+	e := s.entry(parentID)
+	if e == nil {
+		return
+	}
+	frame := protocol.Event{Type: protocol.TypeEvent, SessionID: parentID, Event: protocol.EventChildSpawned, ChildSessionID: childID, At: time.Now().UTC().Format(time.RFC3339)}
+	if e.acp != nil {
+		if b, err := json.Marshal(frame); err == nil {
+			_, _ = e.trySend(b)
+		}
+		return
+	}
+	if sub := e.subscriber(); sub != nil {
+		_ = sub.send(frame)
+	}
+}
+
 // deliverEvent routes a lifecycle event to a session's current subscriber.
 func (s *Server) deliverEvent(id, event string, code *int) {
 	e := s.entry(id)
@@ -423,7 +465,7 @@ func (s *Server) hello() protocol.Hello {
 		HostArch:        runtime.GOARCH,
 		Agents:          s.cfg.AgentNames(),
 		Transports:      transports,
-		HostsChildren:   false,
+		HostsChildren:   true, // protocol 1.3: parentage + subtree kill
 		AgentTransports: agentTransports,
 	}
 }
@@ -550,17 +592,20 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
-	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName}, id)
+	parent := s.validParent(msg.ParentSessionID)
+	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName, parent: parent}, id)
 	_ = cn.send(protocol.Spawned{
-		Type:         protocol.TypeSpawned,
-		SessionID:    id,
-		ClientID:     msg.ClientID,
-		SessionToken: token,
-		Agent:        msg.Agent,
-		PID:          sess.PID,
-		StartedAt:    sess.StartedAt.UTC().Format(time.RFC3339),
+		Type:            protocol.TypeSpawned,
+		SessionID:       id,
+		ClientID:        msg.ClientID,
+		SessionToken:    token,
+		Agent:           msg.Agent,
+		PID:             sess.PID,
+		StartedAt:       sess.StartedAt.UTC().Format(time.RFC3339),
+		ParentSessionID: parent,
 	})
-	log.Printf("spawned %s (agent=%s pid=%d tmux=%q)", id, msg.Agent, sess.PID, tmuxName)
+	s.emitChildSpawned(parent, id)
+	log.Printf("spawned %s (agent=%s pid=%d tmux=%q parent=%q)", id, msg.Agent, sess.PID, tmuxName, parent)
 	s.runSession(id, sess)
 }
 
@@ -598,6 +643,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
+	parent := s.validParent(msg.ParentSessionID)
 	e := &sessionEntry{
 		token:     token,
 		acp:       sess,
@@ -606,6 +652,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		pid:       sess.PID,
 		sub:       cn,
 		outbox:    make(chan []byte, outboxCapacity),
+		parent:    parent,
 	}
 	s.addSession(e, id)
 
@@ -616,17 +663,19 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	}
 
 	_ = cn.send(protocol.Spawned{
-		Type:         protocol.TypeSpawned,
-		SessionID:    id,
-		ClientID:     msg.ClientID,
-		SessionToken: token,
-		Agent:        msg.Agent,
-		PID:          sess.PID,
-		StartedAt:    sess.StartedAt.UTC().Format(time.RFC3339),
+		Type:            protocol.TypeSpawned,
+		SessionID:       id,
+		ClientID:        msg.ClientID,
+		SessionToken:    token,
+		Agent:           msg.Agent,
+		PID:             sess.PID,
+		StartedAt:       sess.StartedAt.UTC().Format(time.RFC3339),
+		ParentSessionID: parent,
 	})
-	log.Printf("spawned %s (agent=%s pid=%d transport=acp)", id, msg.Agent, sess.PID)
+	log.Printf("spawned %s (agent=%s pid=%d transport=acp parent=%q)", id, msg.Agent, sess.PID, parent)
 
 	go s.pumpStructured(e)
+	s.emitChildSpawned(parent, id)
 
 	// Re-surface the session/new config selectors (model / mode / thought_level)
 	// to the browser through the session_update funnel — agents deliver them in

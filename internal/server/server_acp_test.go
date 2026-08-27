@@ -153,7 +153,7 @@ func TestACPHelloAdvertisesTransports(t *testing.T) {
 	ts := acpTestServer(t)
 	c := dialWS(t, ts)
 	hello := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
-	if hello["hosts_children"] != false {
+	if hello["hosts_children"] != true { // protocol 1.3: supervisor trees
 		t.Fatalf("hosts_children = %v", hello["hosts_children"])
 	}
 }
@@ -274,6 +274,61 @@ func TestACPExitDuringStreamNoPanic(t *testing.T) {
 			return f["type"] == "event" && ev == "exited"
 		})
 		_ = c.Close(websocket.StatusNormalClosure, "")
+	}
+}
+
+// C1 (v1.2 supervisor tree): a session spawned with parent_session_id is linked —
+// the child's `spawned` echoes the parent, a `child_spawned` event fires to the
+// parent's owner, and the sessions list (re-attach) carries the parent.
+func TestChildSpawnLinkage(t *testing.T) {
+	ts := acpTestServer(t)
+	c, parentSID, _ := registerAndSpawn(t, ts, protocol.TransportACP, nil)
+
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": map[string]string{}, "client_id": "cid-child", "transport": protocol.TransportACP, "parent_session_id": parentSID})
+
+	child := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned && f["client_id"] == "cid-child" })
+	if child["parent_session_id"] != parentSID {
+		t.Fatalf("child spawned parent = %v, want %v", child["parent_session_id"], parentSID)
+	}
+	childSID, _ := child["session_id"].(string)
+
+	ev := recvUntil(t, c, func(f frame) bool {
+		return f["type"] == "event" && f["event"] == "child_spawned" && f["session_id"] == parentSID
+	})
+	if ev["child_session_id"] != childSID {
+		t.Fatalf("child_spawned child_session_id = %v, want %v", ev["child_session_id"], childSID)
+	}
+
+	// A fresh connection's sessions list carries the parent (re-attach rebuilds the tree).
+	c2 := dialWS(t, ts)
+	recvUntil(t, c2, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c2, msg{"type": "register", "registration_token": "test-registration-token"})
+	list := recvUntil(t, c2, func(f frame) bool { return f["type"] == protocol.TypeSessions })
+	sessions, _ := list["sessions"].([]any)
+	var found bool
+	for _, s := range sessions {
+		m, _ := s.(map[string]any)
+		if m["session_id"] == childSID {
+			found = true
+			if m["parent_session_id"] != parentSID {
+				t.Fatalf("sessions list child parent = %v, want %v", m["parent_session_id"], parentSID)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("child %s not in sessions list", childSID)
+	}
+}
+
+// A parent_session_id that isn't live spawns at root — never fails the spawn.
+func TestChildSpawnUnknownParentRoots(t *testing.T) {
+	ts := acpTestServer(t)
+	c, _, _ := registerAndSpawn(t, ts, protocol.TransportACP, nil)
+
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": map[string]string{}, "client_id": "cid-orphan", "transport": protocol.TransportACP, "parent_session_id": "deadbeefdeadbeef"})
+	sp := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned && f["client_id"] == "cid-orphan" })
+	if p, ok := sp["parent_session_id"]; ok && p != "" {
+		t.Fatalf("dead parent should spawn at root, got parent=%v", p)
 	}
 }
 
