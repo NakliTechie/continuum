@@ -36,7 +36,7 @@ import (
 )
 
 // RelayVersion is reported in the hello message.
-const RelayVersion = "0.5.0"
+const RelayVersion = "0.6.0" // v1.2: supervisor-tree parentage + subtree kill
 
 type sessionEntry struct {
 	token     string
