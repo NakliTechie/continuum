@@ -92,6 +92,7 @@ type Session struct {
 	cap   *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
 
 	writeMu sync.Mutex
+	capMu   sync.Mutex // serializes event-log (s.cap) writes across reader + writer goroutines
 
 	mu      sync.Mutex
 	nextID  int64
@@ -296,6 +297,9 @@ func resolveOutcome(outcome string, options []permOption) string {
 		"approve_always": {"allow_always", "allow_once"},
 		"reject":         {"reject_once", "reject_always", "reject"},
 	}[outcome]
+	if preferred == nil {
+		return "" // unknown/empty outcome fails CLOSED — caller errors, never auto-approve
+	}
 	for _, want := range preferred {
 		for _, o := range options {
 			if o.Kind == want {
@@ -303,8 +307,15 @@ func resolveOutcome(outcome string, options []permOption) string {
 			}
 		}
 	}
-	for _, o := range options { // last resort: first offered option
-		return o.OptionID
+	// Requested disposition not offered under a known kind: fall back only among
+	// reject kinds (denying is always safe). Never pick the first option — agents
+	// list allow-options first, so that would auto-approve a malformed response.
+	if outcome == "reject" {
+		for _, o := range options {
+			if strings.HasPrefix(o.Kind, "reject") {
+				return o.OptionID
+			}
+		}
 	}
 	return ""
 }
@@ -344,16 +355,33 @@ func (s *Session) Kill() {
 
 func (s *Session) closeFiles() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
 	s.closed = true
+	// Unblock every in-flight request (e.g. handlePrompt waiting on a turn) whose
+	// child just died — otherwise the waiter goroutine and its pending slot leak.
+	for key, ch := range s.pending {
+		select {
+		case ch <- nil:
+		default:
+		}
+		delete(s.pending, key)
+	}
+	s.mu.Unlock()
+
+	// Flush/close the child pipe under writeMu (write() uses it too — different
+	// lock from s.mu, so take it here to avoid racing a late Cancel/RespondPermission).
+	s.writeMu.Lock()
 	_ = s.w.Flush()
 	_ = s.stdin.Close()
+	s.writeMu.Unlock()
+	s.capMu.Lock()
 	if s.cap != nil {
 		_ = s.cap.Close()
 	}
+	s.capMu.Unlock()
 }
 
 // request sends a request and waits for its response up to timeout.
@@ -402,11 +430,6 @@ func (s *Session) sendRequest(method string, params any) (<-chan *Envelope, func
 	return ch, cleanup, nil
 }
 
-// notify sends a notification (no id, no reply expected).
-func (s *Session) notify(method string, params any) error {
-	return s.write(Envelope{JSONRPC: "2.0", Method: method, Params: mustJSON(params)})
-}
-
 // write serializes one frame out and captures it before the bytes hit the pipe.
 func (s *Session) write(env Envelope) error {
 	line, err := json.Marshal(env)
@@ -433,7 +456,11 @@ func (s *Session) logFrame(dir string, frame []byte) {
 		Dir   string          `json:"dir"`
 		Frame json.RawMessage `json:"frame"`
 	}{time.Now().UTC().Format(time.RFC3339Nano), dir, json.RawMessage(frame)})
+	// Reader goroutine (a>c) and writer path (c>a) both log — serialize so lines
+	// never interleave and corrupt the JSONL replay artifact.
+	s.capMu.Lock()
 	_, _ = s.cap.Write(append(rec, '\n'))
+	s.capMu.Unlock()
 }
 
 func mustJSON(v any) json.RawMessage {

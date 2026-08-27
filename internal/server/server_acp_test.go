@@ -256,6 +256,27 @@ func TestACPCancelThenKill(t *testing.T) {
 	})
 }
 
+// A session exiting while its structured frames are still streaming must never
+// panic the relay (C1: send on a closed outbox). We prompt — which makes the
+// relay deliver config/usage/message frames through the outbox — then kill the
+// child mid-turn, repeatedly, so a close races in-flight sends. Under -race, a
+// regression here crashes the whole test binary; passing = the guard holds.
+func TestACPExitDuringStreamNoPanic(t *testing.T) {
+	ts := acpTestServer(t)
+	for i := 0; i < 8; i++ {
+		c, sid, token := registerAndSpawn(t, ts, nil, map[string]string{"FAKE_SLOW_MS": "30"})
+		sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": token, "text": "stream then die"})
+		// Kill immediately — the turn (and its config/usage/message frames) is in
+		// flight, so removeSession+closeOutbox races the reader's deliverStructured.
+		sendMsg(t, c, msg{"type": "signal", "session_id": sid, "session_token": token, "signal": "kill"})
+		recvUntil(t, c, func(f frame) bool {
+			ev, _ := f["event"].(string)
+			return f["type"] == "event" && ev == "exited"
+		})
+		_ = c.Close(websocket.StatusNormalClosure, "")
+	}
+}
+
 // acpUpdate pulls the ACP `update` object out of a session_update frame, or nil.
 func acpUpdate(f frame) map[string]any {
 	if f["type"] != protocol.TypeSessionUpdate {

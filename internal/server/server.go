@@ -61,6 +61,7 @@ type sessionEntry struct {
 	seq     int64       // monotonic across session_update/permission_request frames
 	tail    [][]byte    // recently delivered frames, replayed on re-attach (capped)
 	dropped int         // frames dropped since the last marker was queued
+	closed  bool        // outbox closed; sending after this panics, so every send checks it
 
 	// Latest instrument frames (config selectors + last turn's token usage),
 	// kept outside the tail ring so a long session still restores them on
@@ -113,6 +114,14 @@ func (s *Server) entry(id string) *sessionEntry {
 	return s.sessions[id]
 }
 
+// entrySess reads e.sess under s.mu — it's written under that lock in handleAttach
+// (tmux adopt), so every read takes the same lock to stay race-free.
+func (s *Server) entrySess(e *sessionEntry) *pty.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return e.sess
+}
+
 // authSession returns the session iff the token matches (constant-time).
 func (s *Server) authSession(id, token string) *sessionEntry {
 	s.mu.Lock()
@@ -130,10 +139,11 @@ func (s *Server) authSession(id, token string) *sessionEntry {
 // getSession returns the PTY session iff the token matches (constant-time).
 func (s *Server) getSession(id, token string) (*pty.Session, bool) {
 	e := s.authSession(id, token)
-	if e == nil || e.sess == nil {
+	if e == nil {
 		return nil, false
 	}
-	return e.sess, true
+	sess := s.entrySess(e)
+	return sess, sess != nil
 }
 
 func (s *Server) reissueToken(id, token string) {
@@ -623,7 +633,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 			c := code
 			s.queueStructuredEvent(e, id, protocol.EventExited, &c)
 			s.removeSession(id)
-			close(e.outbox) // ends the pump
+			e.closeOutbox() // ends the pump; guarded so late sends drop, not panic
 			log.Printf("exited %s (code=%d)", id, code)
 		})
 	}()
@@ -633,10 +643,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 // queue so it never overtakes the frames that caused it.
 func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *int) {
 	b, _ := json.Marshal(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
-	select {
-	case e.outbox <- b:
-	default:
-	}
+	_, _ = e.trySend(b)
 }
 
 const (
@@ -714,9 +721,7 @@ func (s *Server) deliverStructured(id string, params json.RawMessage) {
 		return
 	}
 	e.appendTail(b)
-	select {
-	case e.outbox <- b:
-	default:
+	if sent, closed := e.trySend(b); !sent && !closed {
 		s.dropStructured(e, id)
 	}
 }
@@ -732,9 +737,7 @@ func (s *Server) deliverPermissionRequest(id, requestID string, params json.RawM
 		return
 	}
 	e.appendTail(b)
-	select {
-	case e.outbox <- b:
-	default:
+	if sent, closed := e.trySend(b); !sent && !closed {
 		s.dropStructured(e, id)
 	}
 }
@@ -745,10 +748,37 @@ func (s *Server) dropStructured(e *sessionEntry, id string) {
 	n := e.dropped
 	e.outMu.Unlock()
 	marker, _ := json.Marshal(protocol.NewError(id, "frames_dropped", fmt.Sprintf("%d structured frame(s) dropped by backpressure", n)))
-	select {
-	case e.outbox <- marker:
-	default:
+	_, _ = e.trySend(marker)
+}
+
+// trySend queues one frame on the outbox under outMu. It NEVER sends on a closed
+// outbox (that panics), so a frame produced by the ACP reader goroutine racing the
+// child's exit is dropped, not fatal. Returns (sent, closed): !sent && !closed
+// means backpressure drop; closed means the session is gone.
+func (e *sessionEntry) trySend(b []byte) (sent, closed bool) {
+	e.outMu.Lock()
+	defer e.outMu.Unlock()
+	if e.closed {
+		return false, true
 	}
+	select {
+	case e.outbox <- b:
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+// closeOutbox ends the pump exactly once, under the same lock every sender takes,
+// so no send can be in flight when the channel closes.
+func (e *sessionEntry) closeOutbox() {
+	e.outMu.Lock()
+	defer e.outMu.Unlock()
+	if e.closed {
+		return
+	}
+	e.closed = true
+	close(e.outbox)
 }
 
 func (e *sessionEntry) appendTail(b []byte) {
@@ -884,11 +914,9 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			if err != nil {
 				continue
 			}
-			select {
-			case e.outbox <- frame:
-			default:
-			}
+			_, _ = e.trySend(frame)
 		}
+	replay:
 		for _, b := range e.tailSnapshot() {
 			// Replayed history carries seq -1 (the PTY-attach convention): clients
 			// render it but never re-persist it into their event logs.
@@ -899,12 +927,13 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 					b = nb
 				}
 			}
-			select {
-			case e.outbox <- b:
-			default:
-				s := cn.srv
-				s.dropStructured(e, msg.SessionID) // queue full; the marker says so
-				break
+			sent, closed := e.trySend(b)
+			if closed {
+				break replay
+			}
+			if !sent {
+				cn.srv.dropStructured(e, msg.SessionID) // queue full; the marker says so
+				break replay // stop replaying once we've dropped; don't spam the counter
 			}
 		}
 		log.Printf("reattached %s (structured)", msg.SessionID)
@@ -913,7 +942,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 
 	// A tmux session adopted after a relay restart has no PTY yet — attach one now.
 	// tmux redraws the pane on attach, so the client sees current state immediately.
-	if e.sess == nil {
+	if cn.srv.entrySess(e) == nil {
 		if e.tmuxName == "" || !tmux.Exists(e.tmuxName) {
 			cn.srv.removeSession(msg.SessionID)
 			_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
@@ -950,8 +979,10 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 		StartedAt:    e.startedAt.UTC().Format(time.RFC3339),
 		PID:          e.pid,
 	})
-	if buf := e.sess.Buffer(); len(buf) > 0 {
-		_ = cn.send(protocol.Output{Type: protocol.TypeOutput, SessionID: msg.SessionID, Data: base64.StdEncoding.EncodeToString(buf), Seq: -1})
+	if sess := cn.srv.entrySess(e); sess != nil {
+		if buf := sess.Buffer(); len(buf) > 0 {
+			_ = cn.send(protocol.Output{Type: protocol.TypeOutput, SessionID: msg.SessionID, Data: base64.StdEncoding.EncodeToString(buf), Seq: -1})
+		}
 	}
 	log.Printf("reattached %s", msg.SessionID)
 }
@@ -1010,7 +1041,7 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 		}
 		return
 	}
-	sess := e.sess
+	sess := cn.srv.entrySess(e)
 	if sess == nil {
 		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "session has no live PTY")
 		return
