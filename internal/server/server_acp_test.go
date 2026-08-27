@@ -117,8 +117,8 @@ func registerAndSpawn(t *testing.T, ts *httptest.Server, transport any, env map[
 	c := dialWS(t, ts)
 
 	hello := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
-	if hello["protocol_version"] != "1.2" {
-		t.Fatalf("protocol_version = %v, want 1.2", hello["protocol_version"])
+	if hello["protocol_version"] != "1.3" {
+		t.Fatalf("protocol_version = %v, want 1.3", hello["protocol_version"])
 	}
 	transports, _ := hello["transports"].([]any)
 	var sawACP bool

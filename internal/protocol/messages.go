@@ -1,6 +1,6 @@
 // Package protocol defines the Menagerie relay protocol message types.
 //
-// protocol-v1.2
+// protocol-v1.3
 //
 // This is the Go port of protocol/types.ts, which is the canonical definition.
 // Keep the two in sync — if they disagree, types.ts wins.
@@ -14,7 +14,7 @@ package protocol
 import "encoding/json"
 
 // Version is the protocol version this relay speaks.
-const Version = "1.2"
+const Version = "1.3"
 
 // Message type discriminators.
 const (
@@ -108,13 +108,14 @@ type Registered struct {
 }
 
 type Spawned struct {
-	Type         string `json:"type"`
-	SessionID    string `json:"session_id"`
-	ClientID     string `json:"client_id"`
-	SessionToken string `json:"session_token"`
-	Agent        string `json:"agent"`
-	PID          int    `json:"pid"`
-	StartedAt    string `json:"started_at"`
+	Type            string `json:"type"`
+	SessionID       string `json:"session_id"`
+	ClientID        string `json:"client_id"`
+	SessionToken    string `json:"session_token"`
+	Agent           string `json:"agent"`
+	PID             int    `json:"pid"`
+	StartedAt       string `json:"started_at"`
+	ParentSessionID string `json:"parent_session_id,omitempty"` // protocol 1.3; set for a child session
 }
 
 type Output struct {
@@ -146,13 +147,14 @@ type Register struct {
 }
 
 type Spawn struct {
-	Type      string            `json:"type"`
-	Agent     string            `json:"agent"`
-	Cwd       string            `json:"cwd"`
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	ClientID  string            `json:"client_id"`
-	Transport string            `json:"transport,omitempty"` // protocol 1.2; absent ⇒ pty
+	Type            string            `json:"type"`
+	Agent           string            `json:"agent"`
+	Cwd             string            `json:"cwd"`
+	Args            []string          `json:"args"`
+	Env             map[string]string `json:"env"`
+	ClientID        string            `json:"client_id"`
+	Transport       string            `json:"transport,omitempty"`         // protocol 1.2; absent ⇒ pty
+	ParentSessionID string            `json:"parent_session_id,omitempty"` // protocol 1.3; spawn as a child (supervisor tree)
 }
 
 type Input struct {
@@ -169,6 +171,7 @@ type Signal struct {
 	Signal       string `json:"signal"`
 	Cols         int    `json:"cols,omitempty"`
 	Rows         int    `json:"rows,omitempty"`
+	Subtree      bool   `json:"subtree,omitempty"` // protocol 1.3; kill only — also kill descendants (leaf-first)
 }
 
 type Resume struct {
@@ -237,11 +240,12 @@ func NewError(sessionID, code, message string) Error {
 
 // SessionInfo describes one live session in a Sessions list.
 type SessionInfo struct {
-	SessionID string `json:"session_id"`
-	Agent     string `json:"agent"`
-	StartedAt string `json:"started_at"`
-	PID       int    `json:"pid"`
-	Transport string `json:"transport,omitempty"` // protocol 1.2; absent ⇒ pty (so re-attach doesn't guess)
+	SessionID       string `json:"session_id"`
+	Agent           string `json:"agent"`
+	StartedAt       string `json:"started_at"`
+	PID             int    `json:"pid"`
+	Transport       string `json:"transport,omitempty"`         // protocol 1.2; absent ⇒ pty (so re-attach doesn't guess)
+	ParentSessionID string `json:"parent_session_id,omitempty"` // protocol 1.3; present for a child (re-attach rebuilds the tree)
 }
 
 // Sessions (relay -> browser) lists live sessions, sent right after `registered`.
