@@ -509,7 +509,11 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
 		return
 	}
-	id := randomID()
+	id, err := randomID()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
+		return
+	}
 	s := cn.srv
 
 	// When tmux is in play the agent runs inside a detached tmux session (so it
@@ -574,7 +578,11 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	cmd.Dir = msg.Cwd
 	cmd.Env = shims.MergeEnv(msg.Env)
 
-	id := randomID()
+	id, err := randomID()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
+		return
+	}
 	sess, err := acp.Start(id, msg.Agent, msg.Cwd, cmd)
 	if err != nil {
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
@@ -781,6 +789,24 @@ func (e *sessionEntry) closeOutbox() {
 	close(e.outbox)
 }
 
+// stampReplaySeq rewrites a frame's seq to -1 for re-attach replay — any frame
+// type carrying a seq (session_update, permission_request). Returns b unchanged
+// if it doesn't parse or has no seq.
+func stampReplaySeq(b []byte) []byte {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return b
+	}
+	if _, ok := m["seq"]; !ok {
+		return b
+	}
+	m["seq"] = json.RawMessage("-1")
+	if nb, err := json.Marshal(m); err == nil {
+		return nb
+	}
+	return b
+}
+
 func (e *sessionEntry) appendTail(b []byte) {
 	e.outMu.Lock()
 	defer e.outMu.Unlock()
@@ -919,14 +945,10 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 	replay:
 		for _, b := range e.tailSnapshot() {
 			// Replayed history carries seq -1 (the PTY-attach convention): clients
-			// render it but never re-persist it into their event logs.
-			var su protocol.SessionUpdate
-			if err := json.Unmarshal(b, &su); err == nil && su.Type == protocol.TypeSessionUpdate {
-				su.Seq = -1
-				if nb, err := json.Marshal(su); err == nil {
-					b = nb
-				}
-			}
+			// render it but never re-persist it. Stamp every frame that has a seq —
+			// session_update AND permission_request — so a replayed prompt isn't
+			// mistaken for a fresh, actionable one.
+			b = stampReplaySeq(b)
 			sent, closed := e.trySend(b)
 			if closed {
 				break replay
@@ -1078,8 +1100,10 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 }
 
 // randomID returns a short hex session id.
-func randomID() string {
+func randomID() (string, error) {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err // never return an all-zero (predictable/colliding) id
+	}
+	return hex.EncodeToString(b), nil
 }

@@ -106,6 +106,20 @@ func selfPath() string {
 	return abs
 }
 
+// xmlEscape makes a filesystem path safe to embed in a plist <string> body —
+// `&`, `<`, `>` are all legal in filenames and would otherwise malform the XML.
+var xmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+
+func xmlEscape(s string) string { return xmlEscaper.Replace(s) }
+
+// A newline in an install path would let it inject plist/systemd-unit directives;
+// no legitimate relay path contains one. Reject rather than emit a malformed unit.
+func requireSafePath(what, p string) {
+	if strings.ContainsAny(p, "\n\r") {
+		fatalf("refusing to install: %s path contains a newline: %q", what, p)
+	}
+}
+
 func menagerieDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -119,6 +133,8 @@ func serviceInstall(path string) {
 	bin := selfPath()
 	logPath := filepath.Join(menagerieDir(), "relay.log")
 
+	requireSafePath("binary", bin)
+	requireSafePath("log", logPath)
 	switch runtime.GOOS {
 	case "darwin":
 		installLaunchd(bin, logPath)
@@ -158,7 +174,7 @@ func installLaunchd(bin, logPath string) {
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, bin, logPath, logPath)
+`, launchdLabel, xmlEscape(bin), xmlEscape(logPath), xmlEscape(logPath))
 	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
 		fatal(err)
 	}
@@ -190,7 +206,7 @@ Description=Menagerie relay
 After=network.target
 
 [Service]
-ExecStart=%s serve
+ExecStart="%s" serve
 Restart=always
 RestartSec=2
 

@@ -17,6 +17,3 @@ func (c ClaudeCode) Spawn(cwd string, args []string, env map[string]string) (*ex
 	}
 	return build(bin, args, cwd, env), nil
 }
-
-func (ClaudeCode) DetectIdle(buf []byte) bool       { return false }
-func (ClaudeCode) DetectNeedsInput(buf []byte) bool { return endsWithPrompt(buf) }

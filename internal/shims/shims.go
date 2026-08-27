@@ -12,13 +12,12 @@ import (
 	"strings"
 )
 
-// Shim builds an agent's command and detects naive activity signals.
-// Interface per HANDOFF-v1.0.md §5.
+// Shim builds an agent's command. Activity heuristics are NOT per-shim — the
+// relay applies the generic LooksLike* functions (below) to every session's PTY
+// output, so a shim only needs to know how to spawn its agent.
 type Shim interface {
 	Name() string
 	Spawn(cwd string, args []string, env map[string]string) (*exec.Cmd, error)
-	DetectIdle(buf []byte) bool       // naive in v1.0, refined in v1.1
-	DetectNeedsInput(buf []byte) bool // naive in v1.0, refined in v1.1
 }
 
 // NewRegistry returns the shims implemented in this build, keyed by agent id.
@@ -63,19 +62,14 @@ func hasEnv(environ []string, key string) bool {
 	return false
 }
 
-// endsWithPrompt is a conservative needs-input heuristic: trailing output looks
-// like a prompt. False negatives are fine; false positives are annoying.
-func endsWithPrompt(buf []byte) bool {
-	s := strings.TrimRight(string(buf), " \t\r\n")
-	if s == "" {
-		return false
+// tailLines returns the last n lines of buf as one string (for tail-scoped
+// heuristics that shouldn't match text far back in a long session).
+func tailLines(buf []byte, n int) string {
+	lines := strings.Split(string(buf), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
 	}
-	for _, suffix := range []string{">", "?", ":", "$", "#", "❯"} {
-		if strings.HasSuffix(s, suffix) {
-			return true
-		}
-	}
-	return false
+	return strings.Join(lines, "\n")
 }
 
 func lastNonEmptyLine(buf []byte) string {
@@ -164,8 +158,10 @@ func normalizeLoopLine(l string) string {
 }
 
 // LooksLikeRateLimited flags provider rate-limit / quota messages in output.
+// Scans only the tail (the recent lines) so agent output that merely *discusses*
+// rate limits earlier in a long session doesn't false-positive the whole thing.
 func LooksLikeRateLimited(buf []byte) bool {
-	s := strings.ToLower(string(buf))
+	s := strings.ToLower(tailLines(buf, 5))
 	for _, p := range []string{
 		"rate limit", "rate-limit", "too many requests", "retry-after",
 		"retry after", "quota exceeded", "usage limit", "overloaded",

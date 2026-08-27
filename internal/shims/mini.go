@@ -17,6 +17,3 @@ func (m Mini) Spawn(cwd string, args []string, env map[string]string) (*exec.Cmd
 	}
 	return build(bin, args, cwd, env), nil
 }
-
-func (Mini) DetectIdle(buf []byte) bool       { return false }
-func (Mini) DetectNeedsInput(buf []byte) bool { return endsWithPrompt(buf) }

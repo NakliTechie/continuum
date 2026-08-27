@@ -17,6 +17,3 @@ func (Custom) Spawn(cwd string, args []string, env map[string]string) (*exec.Cmd
 	}
 	return build(args[0], args[1:], cwd, env), nil
 }
-
-func (Custom) DetectIdle(buf []byte) bool       { return false }
-func (Custom) DetectNeedsInput(buf []byte) bool { return false }
