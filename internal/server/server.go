@@ -166,7 +166,11 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 	defer s.mu.Unlock()
 	out := make([]protocol.SessionInfo, 0, len(s.sessions))
 	for id, e := range s.sessions {
-		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid})
+		transport := protocol.TransportPTY
+		if e.acp != nil {
+			transport = protocol.TransportACP
+		}
+		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport})
 	}
 	return out
 }

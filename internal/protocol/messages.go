@@ -241,6 +241,7 @@ type SessionInfo struct {
 	Agent     string `json:"agent"`
 	StartedAt string `json:"started_at"`
 	PID       int    `json:"pid"`
+	Transport string `json:"transport,omitempty"` // protocol 1.2; absent ⇒ pty (so re-attach doesn't guess)
 }
 
 // Sessions (relay -> browser) lists live sessions, sent right after `registered`.
