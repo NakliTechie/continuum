@@ -80,6 +80,12 @@ type Session struct {
 
 	ACPSessionID string // agent-side id from session/new
 
+	// InitConfig holds the raw `configOptions` array from the session/new
+	// result (model / mode / thought_level selectors, with labels). Agents
+	// deliver these in the response, not as a notification, so the server
+	// re-surfaces them to the browser through the session_update funnel.
+	InitConfig json.RawMessage
+
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 	w     *bufio.Writer
@@ -156,13 +162,19 @@ func Start(id, agent, cwd string, cmd *exec.Cmd) (*Session, error) {
 		return nil, fmt.Errorf("acp session/new: %v", sn.Error)
 	}
 	var snr struct {
-		SessionID string `json:"sessionId"`
+		SessionID     string          `json:"sessionId"`
+		ConfigOptions json.RawMessage `json:"configOptions"`
 	}
 	if err := json.Unmarshal(sn.Result, &snr); err != nil || snr.SessionID == "" {
 		s.Kill()
 		return nil, fmt.Errorf("acp session/new: bad result %s", string(sn.Result))
 	}
 	s.ACPSessionID = snr.SessionID
+	// Empty arrays and null both mean "no selectors" — leave InitConfig nil so
+	// the server skips the config frame rather than emitting an empty one.
+	if len(snr.ConfigOptions) > 0 && string(snr.ConfigOptions) != "null" && string(snr.ConfigOptions) != "[]" {
+		s.InitConfig = snr.ConfigOptions
+	}
 	return s, nil
 }
 

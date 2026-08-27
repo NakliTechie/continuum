@@ -61,6 +61,12 @@ type sessionEntry struct {
 	seq     int64       // monotonic across session_update/permission_request frames
 	tail    [][]byte    // recently delivered frames, replayed on re-attach (capped)
 	dropped int         // frames dropped since the last marker was queued
+
+	// Latest instrument frames (config selectors + last turn's token usage),
+	// kept outside the tail ring so a long session still restores them on
+	// re-attach after the originals scrolled out. Guarded by outMu.
+	lastConfig    []byte
+	lastTurnUsage []byte
 }
 
 func (e *sessionEntry) setSub(cn *conn)   { e.subMu.Lock(); e.sub = cn; e.subMu.Unlock() }
@@ -599,6 +605,19 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	log.Printf("spawned %s (agent=%s pid=%d transport=acp)", id, msg.Agent, sess.PID)
 
 	go s.pumpStructured(e)
+
+	// Re-surface the session/new config selectors (model / mode / thought_level)
+	// to the browser through the session_update funnel — agents deliver them in
+	// the response, which the browser never sees. Kept on the entry so re-attach
+	// restores them even after they scroll out of the tail ring.
+	if len(sess.InitConfig) > 0 {
+		frame := configOptionUpdate(id, sess.InitConfig)
+		e.outMu.Lock()
+		e.lastConfig = frame
+		e.outMu.Unlock()
+		s.deliverStructured(id, frame)
+	}
+
 	go func() {
 		sess.Run(func(code int) {
 			c := code
@@ -641,6 +660,44 @@ func (e *sessionEntry) nextSeq() int64 {
 	defer e.outMu.Unlock()
 	e.seq++
 	return e.seq
+}
+
+// configOptionUpdate builds a synthetic `session/update` envelope carrying the
+// agent's own `configOptions` (from the session/new result) as a real ACP
+// `config_option_update`. Re-surfacing, not fabrication: the array is verbatim
+// from the agent; only the delivery channel changes (response → notification).
+func configOptionUpdate(sessionID string, configOptions json.RawMessage) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"update": map[string]any{
+				"sessionUpdate": "config_option_update",
+				"configOptions": configOptions,
+			},
+		},
+	})
+	return b
+}
+
+// turnUsageUpdate re-surfaces the prompt result's `usage` (per-turn token
+// counts) through the funnel. ACP has no notification for turn usage, so this
+// rides a menagerie-namespaced update kind (`_menagerie/turn_usage`); clients
+// that do not know it render it dim, per ACP's `_`-prefix extension rule.
+func turnUsageUpdate(sessionID string, usage json.RawMessage) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"update": map[string]any{
+				"sessionUpdate": "_menagerie/turn_usage",
+				"usage":         usage,
+			},
+		},
+	})
+	return b
 }
 
 // deliverStructured wraps one ACP notification into a session_update frame:
@@ -741,7 +798,8 @@ func (cn *conn) handlePrompt(raw json.RawMessage) {
 		resp := <-ch
 		stop := ""
 		var r struct {
-			StopReason string `json:"stopReason"`
+			StopReason string          `json:"stopReason"`
+			Usage      json.RawMessage `json:"usage"`
 		}
 		if resp != nil && resp.Result != nil {
 			_ = json.Unmarshal(resp.Result, &r)
@@ -749,6 +807,16 @@ func (cn *conn) handlePrompt(raw json.RawMessage) {
 		}
 		log.Printf("prompt done %s (stopReason=%q)", id, stop)
 		if e := cn.srv.entry(id); e != nil && e.acp != nil {
+			// Turn token usage arrives in the prompt result, not a notification —
+			// re-surface it through the funnel before the idle event so the
+			// instrument bar's token counters never overtake turn-end.
+			if len(r.Usage) > 0 && string(r.Usage) != "null" {
+				frame := turnUsageUpdate(id, r.Usage)
+				e.outMu.Lock()
+				e.lastTurnUsage = frame
+				e.outMu.Unlock()
+				cn.srv.deliverStructured(id, frame)
+			}
 			cn.srv.queueStructuredEvent(e, id, protocol.EventIdle, nil)
 		}
 	}()
@@ -803,6 +871,24 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			StartedAt:    e.startedAt.UTC().Format(time.RFC3339),
 			PID:          e.pid,
 		})
+		// Instrument state first, at seq -1, so model/mode/usage restore even if
+		// the original frames scrolled out of the tail ring on a long session.
+		e.outMu.Lock()
+		instr := [][]byte{e.lastConfig, e.lastTurnUsage}
+		e.outMu.Unlock()
+		for _, params := range instr {
+			if params == nil {
+				continue
+			}
+			frame, err := json.Marshal(protocol.SessionUpdate{Type: protocol.TypeSessionUpdate, SessionID: msg.SessionID, Seq: -1, Acp: params})
+			if err != nil {
+				continue
+			}
+			select {
+			case e.outbox <- frame:
+			default:
+			}
+		}
 		for _, b := range e.tailSnapshot() {
 			// Replayed history carries seq -1 (the PTY-attach convention): clients
 			// render it but never re-persist it into their event logs.

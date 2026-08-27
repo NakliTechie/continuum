@@ -71,7 +71,24 @@ func main() {
 				},
 			})
 		case "session/new":
-			reply(id, msg{"sessionId": "fake-session-0001", "configOptions": []any{}})
+			reply(id, msg{"sessionId": "fake-session-0001", "configOptions": []any{
+				msg{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "fake/opus",
+					"options": []any{
+						msg{"value": "fake/opus", "name": "Fake Opus", "description": "the big one"},
+						msg{"value": "fake/haiku", "name": "Fake Haiku", "description": "the small one"},
+					}},
+				msg{"id": "thought_level", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": "med",
+					"options": []any{
+						msg{"value": "low", "name": "Low"},
+						msg{"value": "med", "name": "Medium"},
+						msg{"value": "high", "name": "High"},
+					}},
+				msg{"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "default",
+					"options": []any{
+						msg{"value": "default", "name": "Default"},
+						msg{"value": "plan", "name": "Plan"},
+					}},
+			}})
 		case "session/prompt":
 			sessionID := "fake-session-0001"
 			if pm, ok := m["params"].(map[string]any); ok {
@@ -157,5 +174,5 @@ func runTurn(sessionID string, id any, cancelled <-chan struct{}) {
 			"content":       msg{"type": "text", "text": "SMOKE-OK"},
 		},
 	}})
-	reply(id, msg{"stopReason": "end_turn"})
+	reply(id, msg{"stopReason": "end_turn", "usage": msg{"inputTokens": 12, "outputTokens": 3, "totalTokens": 15}})
 }

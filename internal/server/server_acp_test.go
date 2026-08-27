@@ -256,6 +256,58 @@ func TestACPCancelThenKill(t *testing.T) {
 	})
 }
 
+// acpUpdate pulls the ACP `update` object out of a session_update frame, or nil.
+func acpUpdate(f frame) map[string]any {
+	if f["type"] != protocol.TypeSessionUpdate {
+		return nil
+	}
+	acpBody, _ := f["acp"].(map[string]any)
+	params, _ := acpBody["params"].(map[string]any)
+	upd, _ := params["update"].(map[string]any)
+	return upd
+}
+
+// The instrument bar's data — model/mode/thinking selectors and per-turn token
+// usage — is delivered by the agent in the session/new and prompt *responses*,
+// which the browser never sees. The relay must re-surface both through the
+// session_update funnel: config on spawn, usage on turn end.
+func TestACPInstrumentFrames(t *testing.T) {
+	ts := acpTestServer(t)
+	c, sid, token := registerAndSpawn(t, ts, nil, nil)
+
+	// config_option_update lands right after spawn, carrying the agent's own
+	// configOptions verbatim (model=Fake Opus, thinking=Medium, mode=Default).
+	cfg := recvUntil(t, c, func(f frame) bool {
+		u := acpUpdate(f)
+		return u != nil && u["sessionUpdate"] == "config_option_update"
+	})
+	opts, _ := acpUpdate(cfg)["configOptions"].([]any)
+	if len(opts) != 3 {
+		t.Fatalf("expected 3 config options, got %d", len(opts))
+	}
+	seen := map[string]string{}
+	for _, o := range opts {
+		om, _ := o.(map[string]any)
+		cat, _ := om["category"].(string)
+		cur, _ := om["currentValue"].(string)
+		seen[cat] = cur
+	}
+	if seen["model"] != "fake/opus" || seen["thought_level"] != "med" || seen["mode"] != "default" {
+		t.Fatalf("config selectors wrong: %v", seen)
+	}
+
+	// A prompt turn ends with the token counts from the result.
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": token, "text": "say ok"})
+	usg := recvUntil(t, c, func(f frame) bool {
+		u := acpUpdate(f)
+		return u != nil && u["sessionUpdate"] == "_menagerie/turn_usage"
+	})
+	usage, _ := acpUpdate(usg)["usage"].(map[string]any)
+	if tot, _ := usage["totalTokens"].(float64); tot != 15 {
+		t.Fatalf("expected totalTokens 15, got %v", usage["totalTokens"])
+	}
+}
+
 func TestACPTransportGuards(t *testing.T) {
 	ts := acpTestServer(t)
 	c, _, token := registerAndSpawn(t, ts, nil, nil)
