@@ -8,6 +8,7 @@
 //	                                 copies the registration token to the clipboard)
 //	menagerie-relay service install  run the relay always-on (launchd / systemd)
 //	menagerie-relay init             generate ~/.menagerie/relay.toml + a token only
+//	menagerie-relay agents           list the agents this relay detected on PATH
 //	menagerie-relay token print      re-print the registration token
 //	menagerie-relay token rotate     generate a new registration token
 package main
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,6 +48,8 @@ func main() {
 		cmdInit(path)
 	case "serve":
 		cmdServe(path)
+	case "agents":
+		cmdAgents(path)
 	case "token":
 		cmdToken(path, args[1:])
 	case "service":
@@ -85,6 +89,11 @@ func cmdServe(path string) {
 	if isInteractive() {
 		announceToken(cfg.RegistrationToken)
 	}
+	// Settle the agent list once, before serving: configured agents plus every
+	// KnownAgent whose command is on PATH. What isn't here is never offered.
+	detected, missing := cfg.ResolveAgents(nil)
+	log.Printf("agents: %v (detected on PATH: %v; %d known agents not installed — `menagerie-relay agents`)",
+		cfg.AgentNames(), detected, len(missing))
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -114,6 +123,33 @@ func cmdServe(path string) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+func cmdAgents(path string) {
+	cfg := ensureConfig(path)
+	detected, missing := cfg.ResolveAgents(nil)
+	configured := map[string]bool{}
+	for _, n := range cfg.AgentNames() {
+		configured[n] = true
+	}
+	for _, n := range detected {
+		configured[n] = false // detected, not written in relay.toml
+	}
+	fmt.Println("Available on this relay:")
+	for _, n := range cfg.AgentNames() {
+		origin := "detected on PATH"
+		if configured[n] {
+			origin = "from relay.toml"
+		}
+		if n == config.CustomAgent {
+			origin = "built in (command comes from the spawn)"
+		}
+		fmt.Printf("  %-16s %-14s %s\n", n, cfg.Agents[n].Command, origin)
+	}
+	if len(missing) > 0 {
+		fmt.Printf("\nKnown but not installed (%d): %s\n", len(missing), strings.Join(missing, " "))
+		fmt.Printf("Install one and restart the relay, or pin it in %s as [agents.NAME] command = \"...\".\n", path)
+	}
 }
 
 func cmdToken(path string, args []string) {
@@ -165,6 +201,8 @@ Usage:
   menagerie-relay service uninstall remove the always-on service
   menagerie-relay service status    is the always-on service running?
   menagerie-relay init              write the config + token only (no serve)
+  menagerie-relay agents            list the agents detected on PATH (and the known
+                                    ones that aren't installed)
   menagerie-relay token print       re-print (and copy) the registration token
   menagerie-relay token rotate      generate a new registration token (invalidates the old)
 `)

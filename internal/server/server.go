@@ -85,13 +85,9 @@ type Server struct {
 
 // New builds a Server for the given config.
 func New(cfg *config.Config) *Server {
-	cmds := make(map[string]string, len(cfg.Agents))
-	for name, a := range cfg.Agents {
-		cmds[name] = a.Command
-	}
 	return &Server{
 		cfg:      cfg,
-		shims:    shims.NewRegistry(cmds),
+		shims:    shims.NewRegistry(cfg.AgentCommands()),
 		sessions: make(map[string]*sessionEntry),
 	}
 }
@@ -1056,7 +1052,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			}
 			if !sent {
 				cn.srv.dropStructured(e, msg.SessionID) // queue full; the marker says so
-				break replay // stop replaying once we've dropped; don't spam the counter
+				break replay                            // stop replaying once we've dropped; don't spam the counter
 			}
 		}
 		log.Printf("reattached %s (structured)", msg.SessionID)

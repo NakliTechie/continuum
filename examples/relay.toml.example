@@ -36,13 +36,31 @@ allowed_origins = ["https://menagerie.naklitechie.com"]
 # Set false to require every origin to be listed explicitly.
 allow_localhost_origins = true
 
-# Agents this relay can spawn. The table key is the id the browser shows
-# (alphabetical, no agent featured); `command` is the executable (PATH lookup).
-# The "custom" shim takes its command from spawn.args, so it needs no `command`.
-[agents.claude-code]
-command = "claude"
+# Agents this relay can spawn.
+#
+# You normally write NOTHING here. At startup the relay probes PATH for every
+# coding-agent CLI it knows about (claude, codex, opencode, qwen, grok, droid,
+# aider, mini, omp, …) and offers the ones it actually finds — so the browser's
+# agent dropdown lists what this machine can really run, and never an agent that
+# would fail on spawn. `menagerie-relay agents` prints what was found and what
+# was not. The known-agent list ships inside the binary and is refreshed at
+# release time; it is never fetched from the network.
+#
+# Add a table here to pin an agent yourself. An entry written in this file is
+# always offered, detected or not, and its `command` wins over the built-in one
+# — that is how you point an id at a wrapper script or a binary off PATH.
+#
+#   [agents.claude-code]
+#   command = "/opt/wrappers/claude-with-proxy"
+#
+#   [agents.my-bot]          # an agent the relay has never heard of
+#   command = "my-bot"
+#
+# Optional per-agent keys: `transports = ["acp"]` when the agent speaks the Agent
+# Client Protocol over stdio, and `acp_args = [...]` for the argv that starts it
+# (default ["acp"]). Claiming acp for an agent that does not speak it breaks the
+# session, so leave it off unless you have checked.
 
-[agents.mini]
-command = "mini"
-
+# The "custom" shim takes its command from spawn.args, so it needs no `command`
+# and is always available.
 [agents.custom]

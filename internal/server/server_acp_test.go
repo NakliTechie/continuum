@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -461,4 +462,40 @@ func TestACPTransportGuards(t *testing.T) {
 		return f["type"] == "error" && (code == protocol.ErrInvalidToken || code == "bad_message")
 	})
 	_ = errF
+}
+
+// A relay must never offer an agent it cannot spawn: hello carries exactly the
+// resolved agent set, so an agent whose command is absent from PATH never
+// reaches the browser's dropdown.
+func TestHelloAdvertisesOnlyResolvedAgents(t *testing.T) {
+	cfg := &config.Config{
+		Name:              "test-relay",
+		Listen:            "127.0.0.1:0",
+		Tmux:              "off",
+		RegistrationToken: "test-registration-token",
+	}
+	cfg.ResolveAgents(func(cmd string) (string, error) {
+		if cmd == "claude" {
+			return "/usr/local/bin/claude", nil
+		}
+		return "", errors.New("not found")
+	})
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+
+	c := dialWS(t, ts)
+	hello := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	agents, _ := hello["agents"].([]any)
+	got := map[string]bool{}
+	for _, a := range agents {
+		got[a.(string)] = true
+	}
+	if !got["claude-code"] || !got["custom"] {
+		t.Fatalf("hello agents = %v, want claude-code + custom", agents)
+	}
+	for _, absent := range []string{"codex", "opencode", "qwen", "omp"} {
+		if got[absent] {
+			t.Errorf("hello advertised %q, which is not installed", absent)
+		}
+	}
 }

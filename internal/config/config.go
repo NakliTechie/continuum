@@ -84,8 +84,8 @@ type Config struct {
 	AllowLocalhostOrigins *bool `toml:"allow_localhost_origins"`
 }
 
-// Default returns a fresh config with a generated registration token and the
-// v1.0 shim set.
+// Default returns a fresh config with a generated registration token. Agents
+// are detected, not hardcoded here — see KnownAgents and ResolveAgents.
 func Default() (*Config, error) {
 	tok, err := GenerateToken()
 	if err != nil {
@@ -106,14 +106,12 @@ func Default() (*Config, error) {
 		// Add "null" (or a "http://localhost:PORT" dev origin) by hand only when
 		// doing local file:// development.
 		AllowedOrigins: []string{"https://menagerie.naklitechie.com"},
+		// Only the shim that needs no binary is written out. The rest of the
+		// agent list is detected on PATH at startup from KnownAgents, so the
+		// browser's dropdown lists what this machine can actually spawn. Pin an
+		// agent here (id + command) to force it regardless of detection.
 		Agents: map[string]Agent{
-			"mini":        {Command: "mini"},
-			"claude-code": {Command: "claude"},
-			"custom":      {},
-			// A known ACP-speaking agent ships as a default so structured
-			// sessions work out of the box. This is configuration, not a code
-			// path — nothing anywhere branches on the name "omp".
-			"omp": {Command: "omp", Transports: []string{"acp"}},
+			CustomAgent: {},
 		},
 	}, nil
 }

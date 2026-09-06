@@ -19,6 +19,7 @@ No runtime deps beyond the Go module set: `coder/websocket`, `BurntSushi/toml` (
 ./menagerie-relay serve    # starts the relay (default 127.0.0.1:7878)
 ```
 
+- `menagerie-relay agents` — list the agents detected on this machine's PATH, and the known ones that aren't installed
 - `menagerie-relay token print` — re-print the registration token
 - `menagerie-relay token rotate` — issue a new token (invalidates the old; clients must re-register)
 
@@ -32,13 +33,19 @@ internal/protocol/     Go port of ../protocol/types.ts (canonical shapes live th
 internal/config/       relay.toml load/save + token generation
 internal/server/       WebSocket server: hello + register  (+ PTY from P3)
 internal/pty/          PTY management                       (P3)
-internal/shims/        per-agent shims: mini, claude-code, custom (P3+)
+internal/shims/        spawn shims: generic (any configured agent) + custom
 examples/              relay.toml.example, systemd + launchd units
 ```
 
-## Adding a shim (P3+)
+## Agents
 
-Each shim is a Go file in `internal/shims/` implementing the `Shim` interface (spawn + idle / needs-input heuristics). A how-to lands in `../docs/writing-a-shim.md` (P6).
+The relay detects agents rather than hardcoding a menu. `internal/config/agents.go` holds `KnownAgents` — a registry of coding-agent CLIs (id → executable) — and at startup `ResolveAgents` probes each command on PATH and advertises only what it finds. So the browser's dropdown lists what this machine can actually spawn, and never an agent whose spawn would fail.
+
+- Anything written in `relay.toml` is always offered, detected or not, and its `command` overrides the registry — that's how you point an id at a wrapper script or an off-PATH binary.
+- `custom` is always available; it takes its command from `spawn.args`.
+- The registry ships in the binary and is refreshed at release time. It is never fetched at runtime: the relay would then be taking the names of programs it executes from the network, and a periodic check would be a phone-home.
+
+Adding an agent is a registry row, not code — every agent except `custom` runs through the one `Generic` shim. Write a new shim only for an agent that needs different spawn mechanics; see `../docs/writing-a-shim.md`.
 
 ## Status
 

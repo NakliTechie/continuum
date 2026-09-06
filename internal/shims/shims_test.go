@@ -94,3 +94,44 @@ func TestLooksLikeStalled(t *testing.T) {
 		})
 	}
 }
+
+func TestNewRegistryIsDataDriven(t *testing.T) {
+	reg := NewRegistry(map[string]string{"claude-code": "claude", "qwen": "qwen", "custom": ""})
+	for _, id := range []string{"claude-code", "qwen", "custom"} {
+		if _, ok := reg[id]; !ok {
+			t.Errorf("registry is missing %q", id)
+		}
+	}
+	if _, ok := reg["mini"]; ok {
+		t.Error("registry invented an agent that was not configured")
+	}
+	if _, ok := reg["custom"].(Custom); !ok {
+		t.Error("custom must keep its own shim, not become a Generic")
+	}
+}
+
+func TestGenericSpawnUsesConfiguredCommand(t *testing.T) {
+	cmd, err := Generic{ID: "claude-code", Cmd: "claude"}.Spawn("/tmp", []string{"--help"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cmd.Args[0]; got != "claude" {
+		t.Errorf("exec = %q, want %q", got, "claude")
+	}
+	if got := cmd.Args[1]; got != "--help" {
+		t.Errorf("args not passed through: %v", cmd.Args)
+	}
+	if cmd.Dir != "/tmp" {
+		t.Errorf("cwd = %q", cmd.Dir)
+	}
+}
+
+func TestGenericSpawnFallsBackToID(t *testing.T) {
+	cmd, err := Generic{ID: "opencode"}.Spawn("", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cmd.Args[0]; got != "opencode" {
+		t.Errorf("exec = %q, want %q", got, "opencode")
+	}
+}

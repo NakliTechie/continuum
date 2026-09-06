@@ -20,15 +20,20 @@ type Shim interface {
 	Spawn(cwd string, args []string, env map[string]string) (*exec.Cmd, error)
 }
 
-// NewRegistry returns the shims implemented in this build, keyed by agent id.
-// `commands` maps an agent id to its configured executable (empty => shim
-// default).
+// NewRegistry returns a shim per configured agent id: "custom" takes its
+// command from spawn.args, everything else is a Generic that execs the
+// configured executable. The set is data-driven — the relay's resolved agent
+// list decides what exists, so no code changes when an agent is added.
 func NewRegistry(commands map[string]string) map[string]Shim {
-	return map[string]Shim{
-		"mini":        Mini{Cmd: commands["mini"]},
-		"claude-code": ClaudeCode{Cmd: commands["claude-code"]},
-		"custom":      Custom{},
+	reg := make(map[string]Shim, len(commands)+1)
+	for id, cmd := range commands {
+		if id == "custom" {
+			continue
+		}
+		reg[id] = Generic{ID: id, Cmd: cmd}
 	}
+	reg["custom"] = Custom{}
+	return reg
 }
 
 // build is the common exec.Cmd assembly for shims.
