@@ -52,6 +52,13 @@ type sessionEntry struct {
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
 
+	// Lifecycle status the relay believes this session is in. Until now status
+	// lived only in the client (the relay just emitted events); `wait` has to
+	// resolve against it server-side, and `done` vs `idle` needs somewhere to
+	// remember whether anyone has looked. Guarded by statusMu.
+	statusMu sync.Mutex
+	status   string
+
 	detMu      sync.Mutex
 	recentText []byte // rolling recent output for the loop detector (capped)
 	stalled    bool   // stalled event already fired; cleared on user input
@@ -401,11 +408,43 @@ func (s *Server) killEntry(id string) {
 }
 
 // deliverEvent routes a lifecycle event to a session's current subscriber.
+// setStatus records a lifecycle transition and reports whether it changed
+// anything. Status is the relay's own belief, not a client's view.
+func (e *sessionEntry) setStatus(status string) bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status == status {
+		return false
+	}
+	e.status = status
+	return true
+}
+
+func (e *sessionEntry) currentStatus() string {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.status == "" {
+		return protocol.StatusRunning
+	}
+	return e.status
+}
+
+// noteEventStatus maps an emitted event onto the session's status. Only
+// lifecycle events move it — child_spawned and friends are informational.
+func noteEventStatus(e *sessionEntry, event string) {
+	switch event {
+	case protocol.EventExited, protocol.EventIdle, protocol.EventDone,
+		protocol.EventNeedsInput, protocol.EventStalled, protocol.EventRateLimited:
+		e.setStatus(event)
+	}
+}
+
 func (s *Server) deliverEvent(id, event string, code *int) {
 	e := s.entry(id)
 	if e == nil {
 		return
 	}
+	noteEventStatus(e, event)
 	if sub := e.subscriber(); sub != nil {
 		_ = sub.send(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
 	}
@@ -541,6 +580,8 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.handleSpawn(raw)
 	case protocol.TypeAttach:
 		cn.handleAttach(raw)
+	case protocol.TypeSeen:
+		cn.handleSeen(raw)
 	case protocol.TypeInput:
 		cn.handleInput(raw)
 	case protocol.TypeSignal:
@@ -784,6 +825,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 // queueStructuredEvent routes a lifecycle event through the session's outbound
 // queue so it never overtakes the frames that caused it.
 func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *int) {
+	noteEventStatus(e, event)
 	b, _ := json.Marshal(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
 	_, _ = e.trySend(b)
 }
@@ -1007,7 +1049,10 @@ func (cn *conn) handlePrompt(raw json.RawMessage) {
 				e.outMu.Unlock()
 				cn.srv.deliverStructured(id, frame)
 			}
-			cn.srv.queueStructuredEvent(e, id, protocol.EventIdle, nil)
+			// Finished, and nobody has looked yet — that is `done`, not `idle`
+			// (spec §8.1.1 E5). A `seen` frame from a client that actually
+			// showed it to a human is what demotes it.
+			cn.srv.queueStructuredEvent(e, id, protocol.EventDone, nil)
 		}
 	}()
 }
@@ -1029,6 +1074,28 @@ func (cn *conn) handlePermissionResponse(raw json.RawMessage) {
 	}
 	if err := e.acp.RespondPermission(msg.RequestID, msg.Outcome, msg.OptionID); err != nil {
 		cn.sendError(msg.SessionID, "unknown_request", err.Error())
+	}
+}
+
+// handleSeen demotes `done` to `idle`: a human has looked. Deliberately narrow —
+// it moves nothing else, so a `seen` on a working or blocked session is a no-op
+// rather than a way to fake a lifecycle transition.
+func (cn *conn) handleSeen(raw json.RawMessage) {
+	var msg protocol.Seen
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		cn.sendError("", "bad_message", "malformed seen")
+		return
+	}
+	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)
+	if e == nil {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
+		return
+	}
+	if e.currentStatus() != protocol.StatusDone {
+		return
+	}
+	if e.setStatus(protocol.StatusIdle) {
+		cn.srv.deliverEvent(msg.SessionID, protocol.EventIdle, nil)
 	}
 }
 

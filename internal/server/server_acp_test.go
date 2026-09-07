@@ -187,7 +187,7 @@ func TestACPSpawnStreamPromptIdle(t *testing.T) {
 				t.Fatalf("session_update seq bad: %v", f["seq"])
 			}
 		case "event":
-			if ev, _ := f["event"].(string); ev == "idle" {
+			if ev, _ := f["event"].(string); ev == protocol.EventDone { // turn end is done-until-seen
 				sawIdle = true
 			}
 		}
@@ -231,7 +231,7 @@ func TestACPPermissionRoundTrip(t *testing.T) {
 	var sawIdle bool
 	for i := 0; i < 50 && !sawIdle; i++ {
 		f := recvFrame(t, c)
-		if ev, _ := f["event"].(string); f["type"] == "event" && ev == "idle" {
+		if ev, _ := f["event"].(string); f["type"] == "event" && ev == protocol.EventDone {
 			sawIdle = true
 		}
 	}
@@ -250,7 +250,7 @@ func TestACPCancelThenKill(t *testing.T) {
 
 	recvUntil(t, c, func(f frame) bool {
 		ev, _ := f["event"].(string)
-		return f["type"] == "event" && ev == "idle" // cancelled turn still completes politely
+		return f["type"] == "event" && ev == protocol.EventDone // cancelled turn still completes politely
 	})
 
 	sendMsg(t, c, msg{"type": "signal", "session_id": sid, "session_token": token, "signal": "kill"})
@@ -636,4 +636,62 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// `done` means finished-and-unseen. Only a client saying a human looked demotes
+// it — reading the session over the protocol must not (spec §8.1.1 E5).
+func TestSeenDemotesDoneToIdle(t *testing.T) {
+	ts := acpTestServer(t)
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{},
+		"client_id": "cid-seen", "transport": protocol.TransportACP})
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	sid, _ := spawned["session_id"].(string)
+	tok, _ := spawned["session_token"].(string)
+
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "go"})
+	recvUntil(t, c, func(f frame) bool {
+		ev, _ := f["event"].(string)
+		return f["type"] == "event" && ev == protocol.EventDone
+	})
+
+	sendMsg(t, c, msg{"type": "seen", "session_id": sid, "session_token": tok})
+	ev := recvUntil(t, c, func(f frame) bool {
+		e, _ := f["event"].(string)
+		return f["type"] == "event" && e == protocol.EventIdle
+	})
+	if ev["session_id"] != sid {
+		t.Fatalf("idle event for the wrong session: %v", ev)
+	}
+	// A second `seen` must not re-emit: idle is not done.
+	sendMsg(t, c, msg{"type": "seen", "session_id": sid, "session_token": tok})
+	sendMsg(t, c, msg{"type": "signal", "session_id": sid, "session_token": tok, "signal": "kill"})
+	next := recvUntil(t, c, func(f frame) bool {
+		e, _ := f["event"].(string)
+		return f["type"] == "event" && (e == protocol.EventIdle || e == protocol.EventExited)
+	})
+	if e, _ := next["event"].(string); e != protocol.EventExited {
+		t.Fatalf("a second seen re-emitted idle; got %v", next)
+	}
+}
+
+func TestSeenRejectsABadToken(t *testing.T) {
+	ts := acpTestServer(t)
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{},
+		"client_id": "cid-seen2", "transport": protocol.TransportACP})
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	sid, _ := spawned["session_id"].(string)
+
+	sendMsg(t, c, msg{"type": "seen", "session_id": sid, "session_token": "not-the-token"})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrInvalidToken {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrInvalidToken)
+	}
 }

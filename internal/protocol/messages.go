@@ -34,6 +34,11 @@ const (
 	// protocol 1.1: live re-attach after a client reconnect
 	TypeSessions = "sessions"
 	TypeAttach   = "attach"
+	// TypeSeen: a client reporting that a human actually looked at this session.
+	// The ONLY thing that demotes `done` to `idle` — reading a session over the
+	// protocol must not (spec §8.1.1 E5), or a supervisor polling its workers
+	// would silently clear the human's attention badge.
+	TypeSeen     = "seen"
 	TypeAttached = "attached"
 
 	// protocol 1.2: structured sessions (transport "acp")
@@ -85,6 +90,26 @@ const (
 	EventChildSpawned = "child_spawned"
 	EventRateLimited  = "rate_limited" // protocol 1.1: generic provider rate-limit signal
 	EventStalled      = "stalled"      // recent output keeps repeating — likely stuck in a loop
+	// EventDone: the agent finished and no one has looked yet. A `seen` frame
+	// from a client that actually showed it to a human demotes it to idle.
+	// Reading a session over the protocol must never demote it (spec §8.1.1 E5).
+	EventDone = "done"
+)
+
+// Session lifecycle statuses. The relay tracks these server-side so `wait` has
+// something to resolve against; they are the same vocabulary the events carry.
+const (
+	StatusRunning     = "running"
+	StatusIdle        = "idle"
+	StatusDone        = "done"
+	StatusNeedsInput  = "needs_input"
+	StatusStalled     = "stalled"
+	StatusRateLimited = "rate_limited"
+	StatusExited      = "exited"
+	// StatusUnknown: an agent is present but its state cannot be classified.
+	// Never a claim of completion, and it never satisfies a wait unless the
+	// caller named it (spec §8.1.1 E3).
+	StatusUnknown = "unknown"
 )
 
 // Envelope peeks at a message's discriminator before full decoding.
@@ -180,6 +205,13 @@ type Input struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token"`
 	Data         string `json:"data"`
+}
+
+// Seen (client -> relay) marks a session as looked-at by a human.
+type Seen struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
 }
 
 type Signal struct {

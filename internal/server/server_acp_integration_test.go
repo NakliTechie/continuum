@@ -69,7 +69,7 @@ func TestIntegrationOMPPromptRoundTrip(t *testing.T) {
 				sawChunk = true
 			}
 		case "event":
-			if ev, _ := f["event"].(string); ev == "idle" {
+			if ev, _ := f["event"].(string); ev == protocol.EventDone { // turn end is done-until-seen
 				sawIdle = true
 			}
 		}
