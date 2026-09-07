@@ -66,10 +66,25 @@ func main() {
 				"agentInfo":       msg{"name": "fakeagent", "title": "Fake Agent", "version": "0.0.1"},
 				"authMethods":     []any{},
 				"agentCapabilities": msg{
-					"loadSession":        false,
+					// Off by default so the refusal path is the default path;
+					// FAKE_LOAD_SESSION=1 exercises resume.
+					"loadSession":        os.Getenv("FAKE_LOAD_SESSION") == "1",
 					"promptCapabilities": msg{"embeddedContext": true},
 				},
 			})
+		case "session/load":
+			// Replay one line of the "past conversation" the way a real agent
+			// does — updates first, then the empty result.
+			pm, _ := m["params"].(map[string]any)
+			loaded, _ := pm["sessionId"].(string)
+			send(msg{"jsonrpc": "2.0", "method": "session/update", "params": msg{
+				"sessionId": loaded,
+				"update": msg{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       msg{"type": "text", "text": "resumed " + loaded},
+				},
+			}})
+			reply(id, msg{})
 		case "session/new":
 			reply(id, msg{"sessionId": "fake-session-0001", "configOptions": []any{
 				msg{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "fake/opus",

@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -102,13 +103,39 @@ type Session struct {
 	closed  bool
 
 	// Callbacks fire on the reader goroutine; keep them fast or hand off.
-	OnUpdate            func(params json.RawMessage)
+	// Set OnUpdate through SetOnUpdate, never directly: a resumed session's
+	// replayed transcript arrives DURING session/load, before the caller can
+	// attach, and those frames must not be dropped.
+	updateMu            sync.Mutex
+	onUpdate            func(params json.RawMessage)
+	pendingUpdates      [][]byte
 	OnPermissionRequest func(requestID string, params json.RawMessage)
 }
+
+// ErrLoadUnsupported means the agent does not advertise the loadSession
+// capability, so its past conversations cannot be reopened. The caller must
+// surface this rather than start a fresh session in its place.
+var ErrLoadUnsupported = errors.New("agent does not support acp session/load")
 
 // Start spawns cmd (the agent's ACP server), completes the initialize +
 // session/new handshake, and returns the ready session.
 func Start(id, agent, cwd string, cmd *exec.Cmd) (*Session, error) {
+	return start(id, agent, cwd, cmd, "")
+}
+
+// Resume spawns cmd and reopens the agent's own past conversation through ACP
+// session/load instead of session/new, so the agent replays that conversation
+// rather than starting an empty one. It fails when the agent does not advertise
+// the loadSession capability — the caller must not silently fall back to a fresh
+// session, which the user would mistake for a resumed one.
+func Resume(id, agent, cwd string, cmd *exec.Cmd, acpSessionID string) (*Session, error) {
+	if acpSessionID == "" {
+		return nil, errors.New("acp resume: empty session id")
+	}
+	return start(id, agent, cwd, cmd, acpSessionID)
+}
+
+func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, error) {
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -152,6 +179,32 @@ func Start(id, agent, cwd string, cmd *exec.Cmd) (*Session, error) {
 	if initResp.Error != nil {
 		s.Kill()
 		return nil, fmt.Errorf("acp initialize: %v", initResp.Error)
+	}
+	// The agent must say it can reload a session before we ask it to.
+	if resumeID != "" {
+		var initRes struct {
+			AgentCapabilities struct {
+				LoadSession bool `json:"loadSession"`
+			} `json:"agentCapabilities"`
+		}
+		if err := json.Unmarshal(initResp.Result, &initRes); err != nil || !initRes.AgentCapabilities.LoadSession {
+			s.Kill()
+			return nil, fmt.Errorf("%w (agent %s)", ErrLoadUnsupported, agent)
+		}
+		ld, err := s.request("session/load", map[string]any{"sessionId": resumeID, "cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
+		if err != nil {
+			s.Kill()
+			return nil, fmt.Errorf("acp session/load: %w", err)
+		}
+		if ld.Error != nil {
+			s.Kill()
+			return nil, fmt.Errorf("acp session/load: %v", ld.Error)
+		}
+		// The agent replays the conversation as session/update notifications
+		// before answering, so by here the transcript is already on its way to
+		// the client through OnUpdate.
+		s.ACPSessionID = resumeID
+		return s, nil
 	}
 	sn, err := s.request("session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
 	if err != nil {
@@ -237,10 +290,17 @@ func (s *Session) dispatch(env *Envelope) {
 		// An agent->client request we do not implement (fs reads, terminal…).
 		_ = s.write(Envelope{JSONRPC: "2.0", ID: env.ID, Error: &RPCError{Code: -32601, Message: "not supported by relay"}})
 	case env.Method == "session/update":
-		if s.OnUpdate != nil {
-			// Full envelope, verbatim — the browser sees exactly what crossed stdio.
-			b, _ := json.Marshal(env)
-			s.OnUpdate(b)
+		// Full envelope, verbatim — the browser sees exactly what crossed stdio.
+		b, _ := json.Marshal(env)
+		s.updateMu.Lock()
+		cb := s.onUpdate
+		if cb == nil {
+			// Nobody is listening yet (session/load replay). Hold it.
+			s.pendingUpdates = append(s.pendingUpdates, b)
+		}
+		s.updateMu.Unlock()
+		if cb != nil {
+			cb(b)
 		}
 	default:
 		// Unknown notification: already captured in the event log; ignore.
@@ -339,6 +399,23 @@ func (s *Session) Cancel() error {
 		Method:  "session/cancel",
 		Params:  mustJSON(map[string]string{"sessionId": s.ACPSessionID}),
 	})
+}
+
+// SetOnUpdate attaches the session/update sink and immediately delivers
+// anything that arrived before it was attached — the replayed transcript of a
+// resumed conversation, in order, before any live frame.
+func (s *Session) SetOnUpdate(f func(params json.RawMessage)) {
+	s.updateMu.Lock()
+	s.onUpdate = f
+	held := s.pendingUpdates
+	s.pendingUpdates = nil
+	s.updateMu.Unlock()
+	if f == nil {
+		return
+	}
+	for _, b := range held {
+		f(b)
+	}
 }
 
 // Kill hard-stops the child process (the `signal kill` path).

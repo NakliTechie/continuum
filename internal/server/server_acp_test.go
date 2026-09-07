@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -564,4 +565,75 @@ func TestSpawnResumeRefusedForAnAgentWithoutResumeSupport(t *testing.T) {
 	if e["code"] != protocol.ErrResumeUnsupported {
 		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrResumeUnsupported)
 	}
+}
+
+// A structured session reopens through ACP session/load, and the agent's own
+// session reference must reach the client — without it, nothing can be resumed.
+func TestACPSpawnReportsTheAgentsSessionID(t *testing.T) {
+	ts := acpTestServer(t)
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{},
+		"client_id": "cid-1", "transport": protocol.TransportACP})
+
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	if spawned["agent_session_id"] != "fake-session-0001" {
+		t.Fatalf("spawned agent_session_id = %v, want the agent's own id", spawned["agent_session_id"])
+	}
+}
+
+func TestACPResumeLoadsTheAgentsPastConversation(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{
+			"fake": {Command: fakeAgentBin, Transports: []string{"acp"}, ACPArgs: []string{}},
+		},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{"FAKE_LOAD_SESSION": "1"},
+		"client_id": "cid-resume", "transport": protocol.TransportACP, "resume_agent_session": "past-convo-7"})
+
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	if spawned["agent_session_id"] != "past-convo-7" {
+		t.Fatalf("resumed session reports agent_session_id = %v, want past-convo-7", spawned["agent_session_id"])
+	}
+	// The agent replays the past conversation as session/update before answering.
+	replay := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSessionUpdate })
+	if !strings.Contains(string(mustMarshal(t, replay)), "resumed past-convo-7") {
+		t.Fatalf("expected the replayed transcript, got %v", replay)
+	}
+}
+
+// An agent that does not advertise loadSession must be refused, never quietly
+// given a fresh empty conversation in place of the one that was asked for.
+func TestACPResumeRefusedWhenAgentCannotLoad(t *testing.T) {
+	ts := acpTestServer(t) // fake agent defaults to loadSession:false
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{},
+		"client_id": "cid-noload", "transport": protocol.TransportACP, "resume_agent_session": "past-convo-7"})
+
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrResumeUnsupported {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrResumeUnsupported)
+	}
+}
+
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

@@ -124,6 +124,10 @@ type Spawned struct {
 	PID             int    `json:"pid"`
 	StartedAt       string `json:"started_at"`
 	ParentSessionID string `json:"parent_session_id,omitempty"` // protocol 1.3; set for a child session
+	// AgentSessionID is the agent's OWN session reference, when it issued one
+	// (structured sessions do at session/new). Persist it: handing it back as
+	// spawn.resume_agent_session is what reopens this conversation later.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
 }
 
 type Output struct {
@@ -260,6 +264,7 @@ type SessionInfo struct {
 	PID             int    `json:"pid"`
 	Transport       string `json:"transport,omitempty"`         // protocol 1.2; absent ⇒ pty (so re-attach doesn't guess)
 	ParentSessionID string `json:"parent_session_id,omitempty"` // protocol 1.3; present for a child (re-attach rebuilds the tree)
+	AgentSessionID  string `json:"agent_session_id,omitempty"`  // the agent's OWN session reference; feed back as spawn.resume_agent_session
 }
 
 // Sessions (relay -> browser) lists live sessions, sent right after `registered`.

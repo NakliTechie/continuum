@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -167,7 +168,11 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 		if e.acp != nil {
 			transport = protocol.TransportACP
 		}
-		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport, ParentSessionID: e.parent})
+		agentSession := ""
+		if e.acp != nil {
+			agentSession = e.acp.ACPSessionID
+		}
+		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport, ParentSessionID: e.parent, AgentSessionID: agentSession})
 	}
 	return out
 }
@@ -686,13 +691,6 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", "unsupported_transport", "agent "+msg.Agent+" does not speak acp")
 		return
 	}
-	// A structured session reopens through ACP's own session/load, not through
-	// argv. Refuse rather than start a fresh conversation the caller would
-	// mistake for a resumed one.
-	if msg.ResumeAgentSession != "" {
-		cn.sendError("", protocol.ErrResumeUnsupported, "acp sessions resume via session/load, not spawn argv")
-		return
-	}
 	cmd := exec.Command(ag.Command, append(ag.ACPArgsOrDefault(), msg.Args...)...)
 	cmd.Dir = msg.Cwd
 	cmd.Env = shims.MergeEnv(msg.Env)
@@ -702,8 +700,19 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
 		return
 	}
-	sess, err := acp.Start(id, msg.Agent, msg.Cwd, cmd)
+	// A structured session reopens through ACP's own session/load — never by
+	// argv, and never by silently starting an empty conversation instead.
+	var sess *acp.Session
+	if msg.ResumeAgentSession != "" {
+		sess, err = acp.Resume(id, msg.Agent, msg.Cwd, cmd, msg.ResumeAgentSession)
+	} else {
+		sess, err = acp.Start(id, msg.Agent, msg.Cwd, cmd)
+	}
 	if err != nil {
+		if errors.Is(err, acp.ErrLoadUnsupported) {
+			cn.sendError("", protocol.ErrResumeUnsupported, err.Error())
+			return
+		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
 		return
 	}
@@ -726,7 +735,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	}
 	s.addSession(e, id)
 
-	sess.OnUpdate = func(params json.RawMessage) { s.deliverStructured(id, params) }
+	sess.SetOnUpdate(func(params json.RawMessage) { s.deliverStructured(id, params) })
 	sess.OnPermissionRequest = func(reqID string, params json.RawMessage) {
 		s.deliverPermissionRequest(id, reqID, params)
 		s.queueStructuredEvent(e, id, protocol.EventNeedsInput, nil)
@@ -741,8 +750,10 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		PID:             sess.PID,
 		StartedAt:       sess.StartedAt.UTC().Format(time.RFC3339),
 		ParentSessionID: parent,
+		AgentSessionID:  sess.ACPSessionID, // persist this: it is what resumes the conversation
 	})
-	log.Printf("spawned %s (agent=%s pid=%d transport=acp parent=%q)", id, msg.Agent, sess.PID, parent)
+	log.Printf("spawned %s (agent=%s pid=%d transport=acp parent=%q acp_session=%q resumed=%v)",
+		id, msg.Agent, sess.PID, parent, sess.ACPSessionID, msg.ResumeAgentSession != "")
 
 	go s.pumpStructured(e)
 	s.emitChildSpawned(parent, id)
