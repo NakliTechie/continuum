@@ -61,6 +61,25 @@ allow_localhost_origins = true
 # (default ["acp"]). Claiming acp for an agent that does not speak it breaks the
 # session, so leave it off unless you have checked.
 
+# Some agents are deliberately NOT auto-detected, because their binary name is
+# owned by a better-known tool and probing it would offer you the wrong program.
+# Uncomment the row for the one you actually installed:
+#
+#   [agents.goose]
+#   command = "goose"        # Block's agent — collides with pressly/goose (DB migrations)
+#
+#   [agents.amp]
+#   command = "amp"          # Sourcegraph Amp — collides with the amp.rs text editor
+#
+#   [agents.cursor]
+#   command = "agent"        # newer Cursor installs; collides with xAI Grok Build
+#
+#   [agents.forge]
+#   command = "forge"        # Forge Code — collides with Foundry's Ethereum tool
+#
+#   [agents.amazon-q]
+#   command = "q"            # Amazon Q Developer CLI (the `qterm` binary IS detected)
+
 # The "custom" shim takes its command from spawn.args, so it needs no `command`
 # and is always available.
 [agents.custom]

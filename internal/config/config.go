@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -34,6 +35,26 @@ type Agent struct {
 	// ACPArgs are appended to Command when spawning transport "acp".
 	// Empty ⇒ ["acp"].
 	ACPArgs []string `toml:"acp_args"`
+	// ResumeArgs is the argv that reopens one of this agent's own past
+	// conversations, with "{id}" standing in for the session reference the agent
+	// reported. Agents disagree on the shape — `--resume <id>`, `resume <id>`,
+	// `--session <id>`, `--resume=<id>` — so it is recorded per agent rather than
+	// assumed. Empty means this agent cannot be resumed; the relay then restarts
+	// it as a fresh session rather than guessing a flag.
+	ResumeArgs []string `toml:"resume_args"`
+}
+
+// SupportsResume reports whether this agent can reopen a past conversation.
+func (a Agent) SupportsResume() bool { return len(a.ResumeArgs) > 0 }
+
+// ResumeArgv returns the argv suffix that resumes session id, with every "{id}"
+// placeholder substituted (including inside a joined form like "--resume={id}").
+func (a Agent) ResumeArgv(id string) []string {
+	out := make([]string, 0, len(a.ResumeArgs))
+	for _, arg := range a.ResumeArgs {
+		out = append(out, strings.ReplaceAll(arg, "{id}", id))
+	}
+	return out
 }
 
 // TransportsOrDefault returns the agent's transports, defaulting to pty-only.

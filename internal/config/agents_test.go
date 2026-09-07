@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -75,13 +76,61 @@ func TestResolveAgentsUnknownConfiguredAgentDefaultsCommandToItsID(t *testing.T)
 	}
 }
 
-func TestKnownAgentsClaimACPOnlyWhereVerified(t *testing.T) {
+// An agent that claims acp must also carry the exact argv that starts its ACP
+// mode — the forms differ (`--acp`, `acp`, or a dedicated binary), and a guessed
+// one yields a broken structured session. Requiring explicit args (even an empty
+// slice, for a binary that IS the ACP server) means someone looked it up.
+func TestKnownAgentsClaimACPOnlyWithExplicitArgs(t *testing.T) {
 	for name, a := range KnownAgents {
 		if a.Command == "" {
 			t.Errorf("KnownAgents[%q] has no command to probe", name)
 		}
-		if a.SupportsACP() && name != "omp" {
-			t.Errorf("KnownAgents[%q] claims acp; only hand-verified agents may", name)
+		if a.SupportsACP() && a.ACPArgs == nil {
+			t.Errorf("KnownAgents[%q] claims acp without recording the invocation", name)
+		}
+	}
+}
+
+// A resume argv is useless unless it says where the session id goes.
+func TestKnownAgentsResumeArgsCarryThePlaceholder(t *testing.T) {
+	for name, a := range KnownAgents {
+		if !a.SupportsResume() {
+			continue
+		}
+		joined := strings.Join(a.ResumeArgs, " ")
+		if !strings.Contains(joined, "{id}") {
+			t.Errorf("KnownAgents[%q] resume args %v have no {id} placeholder", name, a.ResumeArgs)
+		}
+	}
+}
+
+func TestResumeArgvSubstitutesBothForms(t *testing.T) {
+	if got := (Agent{ResumeArgs: []string{"--resume", "{id}"}}).ResumeArgv("s1"); !reflect.DeepEqual(got, []string{"--resume", "s1"}) {
+		t.Errorf("separate-arg form = %v", got)
+	}
+	if got := (Agent{ResumeArgs: []string{"--resume={id}"}}).ResumeArgv("s1"); !reflect.DeepEqual(got, []string{"--resume=s1"}) {
+		t.Errorf("joined form = %v", got)
+	}
+	if got := (Agent{ResumeArgs: []string{"resume", "{id}"}}).ResumeArgv("s1"); !reflect.DeepEqual(got, []string{"resume", "s1"}) {
+		t.Errorf("subcommand form = %v", got)
+	}
+	if (Agent{}).SupportsResume() {
+		t.Error("an agent with no resume args must not claim resume support")
+	}
+}
+
+// Detection must never probe a name a better-known non-agent owns.
+func TestKnownAgentsAvoidCollidingCommands(t *testing.T) {
+	forbidden := map[string]string{
+		"goose": "pressly/goose, a DB migration tool", "amp": "the amp.rs text editor",
+		"agent": "claimed by both Cursor and xAI Grok Build", "code": "VS Code",
+		"coder": "Coder", "q": "too generic", "forge": "Foundry's Ethereum tool",
+		"mcode": "MiniMax Code and Femto Minion Code both take it", "vibe": "ambiguous",
+		"i": "too short", "cb": "too short", "ma": "too short", "sc": "too short",
+	}
+	for name, a := range KnownAgents {
+		if why, bad := forbidden[a.Command]; bad {
+			t.Errorf("KnownAgents[%q] probes %q, which is %s", name, a.Command, why)
 		}
 	}
 }
