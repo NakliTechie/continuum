@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/NakliTechie/menagerie/relay-go/internal/config"
 	"github.com/NakliTechie/menagerie/relay-go/internal/protocol"
+	"github.com/NakliTechie/menagerie/relay-go/internal/shims"
 )
 
 // The fake ACP agent is built once per test run; unit tests must not require
@@ -497,5 +499,69 @@ func TestHelloAdvertisesOnlyResolvedAgents(t *testing.T) {
 		if got[absent] {
 			t.Errorf("hello advertised %q, which is not installed", absent)
 		}
+	}
+}
+
+// Resume must reopen the agent's own conversation, in the agent's own syntax,
+// and must refuse rather than quietly start a fresh one.
+func TestSpawnResumeAppendsTheAgentsOwnArgv(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{
+			"resumable":     {Command: fakeAgentBin, ResumeArgs: []string{"--session", "{id}"}},
+			"not-resumable": {Command: fakeAgentBin},
+		},
+	}
+	srv := New(cfg)
+	shim, ok := srv.shims["resumable"].(shims.Generic)
+	if !ok {
+		t.Fatalf("expected a Generic shim, got %T", srv.shims["resumable"])
+	}
+	cmd, err := shim.Spawn("/tmp", append(cfg.Agents["resumable"].ResumeArgv("sess-42"), "do the thing"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{fakeAgentBin, "--session", "sess-42", "do the thing"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("argv = %v, want %v", cmd.Args, want)
+	}
+	if cfg.Agents["not-resumable"].SupportsResume() {
+		t.Error("an agent with no recorded resume argv must not claim resume support")
+	}
+}
+
+func TestHelloAdvertisesResumableAgents(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{
+			"resumable": {Command: "x", ResumeArgs: []string{"--resume", "{id}"}},
+			"plain":     {Command: "y"},
+		},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+	hello := recvUntil(t, dialWS(t, ts), func(f frame) bool { return f["type"] == protocol.TypeHello })
+	got, _ := hello["resume_agents"].([]any)
+	if len(got) != 1 || got[0] != "resumable" {
+		t.Fatalf("hello resume_agents = %v, want [resumable]", got)
+	}
+}
+
+func TestSpawnResumeRefusedForAnAgentWithoutResumeSupport(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{"plain": {Command: fakeAgentBin}},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "plain", "cwd": "/tmp", "args": []string{}, "env": msg{},
+		"client_id": "c1", "resume_agent_session": "sess-42"})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrResumeUnsupported {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrResumeUnsupported)
 	}
 }

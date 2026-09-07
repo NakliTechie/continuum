@@ -62,7 +62,12 @@ const (
 	ErrAuthFailed   = "auth_failed"
 	ErrUnknownAgent = "unknown_agent"
 	ErrSpawnFailed  = "spawn_failed"
-	ErrInvalidToken = "invalid_token"
+	// ErrResumeUnsupported: a spawn asked to reopen an agent's own past
+	// conversation, but this agent has no recorded resume invocation. Refused
+	// rather than downgraded to a fresh session, so the caller learns the
+	// conversation is not coming back instead of silently losing it.
+	ErrResumeUnsupported = "resume_unsupported"
+	ErrInvalidToken      = "invalid_token"
 )
 
 // Signal kinds.
@@ -101,6 +106,9 @@ type Hello struct {
 	Transports      []string            `json:"transports"`
 	HostsChildren   bool                `json:"hosts_children"`
 	AgentTransports map[string][]string `json:"agent_transports,omitempty"` // protocol 1.2
+	// ResumeAgents lists the agent ids this relay can restart into one of their
+	// own past conversations (spawn.resume_agent_session). Absent/empty ⇒ none.
+	ResumeAgents []string `json:"resume_agents,omitempty"`
 }
 
 type Registered struct {
@@ -155,6 +163,12 @@ type Spawn struct {
 	ClientID        string            `json:"client_id"`
 	Transport       string            `json:"transport,omitempty"`         // protocol 1.2; absent ⇒ pty
 	ParentSessionID string            `json:"parent_session_id,omitempty"` // protocol 1.3; spawn as a child (supervisor tree)
+	// ResumeAgentSession asks the agent to reopen one of ITS OWN past
+	// conversations, identified by a reference the agent itself issued. Distinct
+	// from the `resume` frame, which re-attaches this browser to a live relay
+	// session. The relay appends the agent's recorded resume argv; it never
+	// guesses a flag, and refuses when the agent has none.
+	ResumeAgentSession string `json:"resume_agent_session,omitempty"`
 }
 
 type Input struct {

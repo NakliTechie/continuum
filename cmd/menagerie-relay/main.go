@@ -144,7 +144,14 @@ func cmdAgents(path string) {
 		if n == config.CustomAgent {
 			origin = "built in (command comes from the spawn)"
 		}
-		fmt.Printf("  %-16s %-14s %s\n", n, cfg.Agents[n].Command, origin)
+		flags := ""
+		if cfg.Agents[n].SupportsResume() {
+			flags = " · resumes"
+		}
+		if cfg.Agents[n].SupportsACP() {
+			flags += " · acp"
+		}
+		fmt.Printf("  %-16s %-14s %s%s\n", n, cfg.Agents[n].Command, origin, flags)
 	}
 	if len(missing) > 0 {
 		fmt.Printf("\nKnown but not installed (%d): %s\n", len(missing), strings.Join(missing, " "))

@@ -495,6 +495,13 @@ func (s *Server) hello() protocol.Hello {
 			set[t] = true
 		}
 	}
+	resumable := make([]string, 0, len(s.cfg.Agents))
+	for name, ag := range s.cfg.Agents {
+		if ag.SupportsResume() {
+			resumable = append(resumable, name)
+		}
+	}
+	sort.Strings(resumable)
 	transports := make([]string, 0, len(set))
 	for t := range set {
 		transports = append(transports, t)
@@ -511,6 +518,7 @@ func (s *Server) hello() protocol.Hello {
 		Transports:      transports,
 		HostsChildren:   true, // protocol 1.3: parentage + subtree kill
 		AgentTransports: agentTransports,
+		ResumeAgents:    resumable,
 	}
 }
 
@@ -594,7 +602,18 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrUnknownAgent, "no shim for agent: "+msg.Agent)
 		return
 	}
-	cmd, err := shim.Spawn(msg.Cwd, msg.Args, msg.Env)
+	args := msg.Args
+	if msg.ResumeAgentSession != "" {
+		// The resume argv leads: several agents take a `resume <id>` SUBCOMMAND,
+		// which must precede anything else on the line.
+		ag := cn.srv.cfg.Agents[msg.Agent]
+		if !ag.SupportsResume() {
+			cn.sendError("", protocol.ErrResumeUnsupported, "agent "+msg.Agent+" has no recorded resume invocation")
+			return
+		}
+		args = append(ag.ResumeArgv(msg.ResumeAgentSession), args...)
+	}
+	cmd, err := shim.Spawn(msg.Cwd, args, msg.Env)
 	if err != nil {
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
 		return
@@ -665,6 +684,13 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	}
 	if !ag.SupportsACP() {
 		cn.sendError("", "unsupported_transport", "agent "+msg.Agent+" does not speak acp")
+		return
+	}
+	// A structured session reopens through ACP's own session/load, not through
+	// argv. Refuse rather than start a fresh conversation the caller would
+	// mistake for a resumed one.
+	if msg.ResumeAgentSession != "" {
+		cn.sendError("", protocol.ErrResumeUnsupported, "acp sessions resume via session/load, not spawn argv")
 		return
 	}
 	cmd := exec.Command(ag.Command, append(ag.ACPArgsOrDefault(), msg.Args...)...)
