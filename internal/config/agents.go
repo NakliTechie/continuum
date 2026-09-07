@@ -136,16 +136,33 @@ func (c *Config) ResolveAgents(lookPath func(string) (string, error)) (detected,
 		c.Agents = map[string]Agent{}
 	}
 
-	// Configured entries win. Fill a missing command from the registry so an
-	// entry like a bare `[agents.claude-code]` still knows to run `claude`.
+	// A configured entry overrides the fields it STATES and inherits the rest.
+	// Whole-record replacement looks tidier and is wrong: pinning one field (say
+	// `acp_args`, to select a model) would silently drop the registry's resume
+	// invocation for that agent, and the agent would quietly stop being
+	// resumable. Found exactly that way during the first real-agent run.
 	for name, a := range c.Agents {
-		if a.Command != "" || name == CustomAgent {
+		if name == CustomAgent {
 			continue
 		}
-		if known, ok := KnownAgents[name]; ok {
-			a.Command = known.Command
-		} else {
-			a.Command = name
+		known, isKnown := KnownAgents[name]
+		if a.Command == "" {
+			if isKnown {
+				a.Command = known.Command
+			} else {
+				a.Command = name // an agent we have never heard of: assume its id
+			}
+		}
+		if isKnown {
+			if len(a.Transports) == 0 {
+				a.Transports = known.Transports
+			}
+			if len(a.ACPArgs) == 0 {
+				a.ACPArgs = known.ACPArgs
+			}
+			if len(a.ResumeArgs) == 0 {
+				a.ResumeArgs = known.ResumeArgs
+			}
 		}
 		c.Agents[name] = a
 	}

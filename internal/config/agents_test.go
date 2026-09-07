@@ -151,3 +151,39 @@ func TestAgentCommands(t *testing.T) {
 		t.Errorf("AgentCommands() = %v", got)
 	}
 }
+
+// Found during the first real-agent run: pinning `acp_args` in relay.toml (to
+// select a model) dropped the registry's resume invocation, and the agent
+// silently stopped being resumable. A configured entry overrides the fields it
+// states and inherits the rest.
+func TestConfiguredAgentInheritsUnstatedFields(t *testing.T) {
+	c := &Config{Agents: map[string]Agent{
+		"omp": {Command: "omp", Transports: []string{"acp"}, ACPArgs: []string{"acp", "--model", "claude-haiku-4-5"}},
+	}}
+	c.ResolveAgents(fakeLookPath("omp"))
+
+	got := c.Agents["omp"]
+	if !got.SupportsResume() {
+		t.Fatal("pinning acp_args silently dropped the registry's resume invocation")
+	}
+	if !reflect.DeepEqual(got.ResumeArgs, KnownAgents["omp"].ResumeArgs) {
+		t.Errorf("resume args = %v, want the registry's %v", got.ResumeArgs, KnownAgents["omp"].ResumeArgs)
+	}
+	// What the config DID state still wins.
+	if !reflect.DeepEqual(got.ACPArgs, []string{"acp", "--model", "claude-haiku-4-5"}) {
+		t.Errorf("stated acp_args were overwritten: %v", got.ACPArgs)
+	}
+}
+
+func TestConfiguredAgentCanOverrideAnInheritedField(t *testing.T) {
+	c := &Config{Agents: map[string]Agent{
+		"claude-code": {ResumeArgs: []string{"--continue", "{id}"}},
+	}}
+	c.ResolveAgents(fakeLookPath())
+	if got := c.Agents["claude-code"].ResumeArgs; !reflect.DeepEqual(got, []string{"--continue", "{id}"}) {
+		t.Errorf("resume args = %v, want the configured override", got)
+	}
+	if got := c.Agents["claude-code"].Command; got != "claude" {
+		t.Errorf("command = %q, want the inherited %q", got, "claude")
+	}
+}
