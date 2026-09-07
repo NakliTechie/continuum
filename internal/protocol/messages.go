@@ -38,7 +38,12 @@ const (
 	// The ONLY thing that demotes `done` to `idle` — reading a session over the
 	// protocol must not (spec §8.1.1 E5), or a supervisor polling its workers
 	// would silently clear the human's attention badge.
-	TypeSeen     = "seen"
+	TypeSeen = "seen"
+	// TypeWait / TypeWaited: park until a session reaches one of the named
+	// lifecycle states (spec §8.1). Server-owned and event-driven — the relay
+	// resolves on a transition it already tracks, so no client polls.
+	TypeWait     = "wait"
+	TypeWaited   = "waited"
 	TypeAttached = "attached"
 
 	// protocol 1.2: structured sessions (transport "acp")
@@ -72,7 +77,11 @@ const (
 	// rather than downgraded to a fresh session, so the caller learns the
 	// conversation is not coming back instead of silently losing it.
 	ErrResumeUnsupported = "resume_unsupported"
-	ErrInvalidToken      = "invalid_token"
+	// ErrBadWait: a wait named no states, or named one outside the lifecycle
+	// vocabulary. Refused rather than silently narrowed — a wait that can never
+	// resolve is indistinguishable from a hang.
+	ErrBadWait      = "bad_wait"
+	ErrInvalidToken = "invalid_token"
 )
 
 // Signal kinds.
@@ -205,6 +214,34 @@ type Input struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token"`
 	Data         string `json:"data"`
+}
+
+// Wait (client -> relay) parks until the named session reaches one of `Until`.
+// A wait whose condition is ALREADY true resolves immediately (§8.1.1 E1) —
+// otherwise a supervisor that misses a transition by a millisecond parks until
+// timeout on something that already happened.
+type Wait struct {
+	Type         string   `json:"type"`
+	SessionID    string   `json:"session_id"`
+	SessionToken string   `json:"session_token"`
+	Until        []string `json:"until"`
+	TimeoutMS    int      `json:"timeout_ms,omitempty"`
+	// WaitID is echoed back, so one client can hold several waits on one session.
+	WaitID string `json:"wait_id,omitempty"`
+}
+
+// Waited (relay -> client) resolves a Wait.
+type Waited struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	WaitID    string `json:"wait_id,omitempty"`
+	State     string `json:"state"`
+	TimedOut  bool   `json:"timed_out"`
+	// Brokered marks a wait that some client composed on the relay's behalf
+	// rather than one this relay owns. Always false from a relay; a broker sets
+	// it so a supervisor knows the wait dies with the broker instead of assuming
+	// the durability a relay-owned wait has.
+	Brokered bool `json:"brokered,omitempty"`
 }
 
 // Seen (client -> relay) marks a session as looked-at by a human.

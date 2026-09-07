@@ -58,6 +58,7 @@ type sessionEntry struct {
 	// remember whether anyone has looked. Guarded by statusMu.
 	statusMu sync.Mutex
 	status   string
+	waiters  []*waiter // §8.1 coordination waiters; resolved on transition, drained on exit
 
 	detMu      sync.Mutex
 	recentText []byte // rolling recent output for the loop detector (capped)
@@ -435,7 +436,9 @@ func noteEventStatus(e *sessionEntry, event string) {
 	switch event {
 	case protocol.EventExited, protocol.EventIdle, protocol.EventDone,
 		protocol.EventNeedsInput, protocol.EventStalled, protocol.EventRateLimited:
-		e.setStatus(event)
+		if e.setStatus(event) {
+			e.resolveWaiters(event)
+		}
 	}
 }
 
@@ -582,6 +585,8 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.handleAttach(raw)
 	case protocol.TypeSeen:
 		cn.handleSeen(raw)
+	case protocol.TypeWait:
+		cn.handleWait(raw)
 	case protocol.TypeInput:
 		cn.handleInput(raw)
 	case protocol.TypeSignal:
@@ -1095,6 +1100,7 @@ func (cn *conn) handleSeen(raw json.RawMessage) {
 		return
 	}
 	if e.setStatus(protocol.StatusIdle) {
+		e.resolveWaiters(protocol.StatusIdle)
 		cn.srv.deliverEvent(msg.SessionID, protocol.EventIdle, nil)
 	}
 }
