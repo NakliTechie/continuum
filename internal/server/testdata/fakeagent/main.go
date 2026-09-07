@@ -151,6 +151,11 @@ func drainPermAck() {
 // runTurn streams a chunk and finishes the turn; the cancel channel lets a
 // turn die mid-flight while the reader loop keeps serving messages.
 func runTurn(sessionID string, id any, cancelled <-chan struct{}) {
+	// FAKE_SWALLOW_PROMPT=1: accept the prompt and do absolutely nothing — no
+	// updates, no result. Stands in for a prompt that never reached the agent.
+	if os.Getenv("FAKE_SWALLOW_PROMPT") == "1" {
+		return
+	}
 	if slow := os.Getenv("FAKE_SLOW_MS"); slow != "" {
 		ms, _ := strconv.Atoi(slow)
 		if ms > 0 {

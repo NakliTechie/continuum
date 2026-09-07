@@ -80,8 +80,14 @@ const (
 	// ErrBadWait: a wait named no states, or named one outside the lifecycle
 	// vocabulary. Refused rather than silently narrowed — a wait that can never
 	// resolve is indistinguishable from a hang.
-	ErrBadWait      = "bad_wait"
-	ErrInvalidToken = "invalid_token"
+	ErrBadWait = "bad_wait"
+	// ErrSessionBlocked: the session is waiting on a human decision, so a prompt
+	// was refused and NOTHING was sent (spec §8.2.1 E6). An approval dialog reads
+	// the next input as its answer, so a prompt here would approve or reject a
+	// tool call its sender never saw. Inspect the pending request and answer it
+	// deliberately instead.
+	ErrSessionBlocked = "session_blocked"
+	ErrInvalidToken   = "invalid_token"
 )
 
 // Signal kinds.
@@ -307,6 +313,17 @@ type Prompt struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token"`
 	Text         string `json:"text"`
+	// Wait arms a wait in the SAME frame as the prompt (spec §8.2), so a
+	// supervisor cannot miss a transition that happens between a separate prompt
+	// and wait. The relay arms it before dispatching the prompt.
+	Wait *WaitSpec `json:"wait,omitempty"`
+}
+
+// WaitSpec is the wait half of an atomic prompt+wait.
+type WaitSpec struct {
+	Until     []string `json:"until"`
+	TimeoutMS int      `json:"timeout_ms,omitempty"`
+	WaitID    string   `json:"wait_id,omitempty"`
 }
 
 // ---- Either direction ----

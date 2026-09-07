@@ -143,6 +143,77 @@ func (e *sessionEntry) expireWait(w *waiter) {
 	w.resolve(current, true)
 }
 
+// On E7 (the §8.2.1 stall guard) — a finding from building it, recorded in the
+// spec: that edge belongs to BLIND KEYSTROKE INJECTION, which is how herdr
+// submits work. Typed characters can vanish into a TUI that was not listening,
+// so silence there is evidence the prompt never landed.
+//
+// Menagerie's only task-submission path is ACP, a framed JSON-RPC channel: once
+// `Prompt` returns without error the request is on the agent's stdin, and the
+// remaining failure — an agent that accepts and never answers — is precisely
+// what the wait's own timeout reports. Adding a stall timer on top mislabels the
+// common case, because an agent that simply thinks for longer than the window
+// emits nothing either (TestPromptSlowAgentIsNotAStall failed exactly this way
+// before the guard came out). If a PTY prompt frame is ever added, the guard
+// belongs there, where keystrokes really can go nowhere.
+
+// blockedGuard reports whether a task-style submission must be refused because
+// the session is waiting on a human decision (§8.2.1 E6).
+//
+// This is authoritative on ACP — a real session/request_permission is pending.
+// The PTY path has no task-submission frame today: `input` is the deliberate
+// answer channel and is intentionally NOT guarded, because guarding it would
+// block the very keystrokes that answer the dialog. When a PTY prompt frame
+// exists it routes through here, where its blocked-detection is heuristic and
+// must be documented as best-effort rather than a guarantee.
+func blockedGuard(e *sessionEntry) bool {
+	return e.currentStatus() == protocol.StatusNeedsInput
+}
+
+// armPromptWait arms the §8.2 wait BEFORE the prompt is dispatched. Arming it
+// afterwards races the very transition the caller is waiting for — the gap this
+// frame exists to close.
+func (cn *conn) armPromptWait(e *sessionEntry, sessionID string, spec *protocol.WaitSpec) string {
+	if spec == nil {
+		return ""
+	}
+	until, bad := parseUntil(spec.Until)
+	if bad != "" {
+		return bad
+	}
+	w := &waiter{id: spec.WaitID, until: until, cn: cn, sid: sessionID}
+	w.timer = time.AfterFunc(waitTimeout(spec.TimeoutMS), func() { e.expireWait(w) })
+	if state, satisfied := e.armWait(w); satisfied {
+		w.resolve(state, false)
+	}
+	return ""
+}
+
+func parseUntil(states []string) (map[string]bool, string) {
+	if len(states) == 0 {
+		return nil, "wait must name at least one state"
+	}
+	until := make(map[string]bool, len(states))
+	for _, st := range states {
+		if !validWaitStates[st] {
+			return nil, "not a lifecycle state: " + st
+		}
+		until[st] = true
+	}
+	return until, ""
+}
+
+func waitTimeout(ms int) time.Duration {
+	timeout := time.Duration(ms) * time.Millisecond
+	if ms <= 0 {
+		timeout = defaultWaitTimeout
+	}
+	if timeout > maxWaitTimeout {
+		timeout = maxWaitTimeout
+	}
+	return timeout
+}
+
 func (cn *conn) handleWait(raw json.RawMessage) {
 	var msg protocol.Wait
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -157,26 +228,12 @@ func (cn *conn) handleWait(raw json.RawMessage) {
 	// A wait that names nothing, or names a state that can never arrive, would
 	// be indistinguishable from a hang. Refuse it instead (E3's spirit: nothing
 	// implicit).
-	if len(msg.Until) == 0 {
-		cn.sendError(msg.SessionID, protocol.ErrBadWait, "wait must name at least one state")
+	until, bad := parseUntil(msg.Until)
+	if bad != "" {
+		cn.sendError(msg.SessionID, protocol.ErrBadWait, bad)
 		return
 	}
-	until := make(map[string]bool, len(msg.Until))
-	for _, st := range msg.Until {
-		if !validWaitStates[st] {
-			cn.sendError(msg.SessionID, protocol.ErrBadWait, "not a lifecycle state: "+st)
-			return
-		}
-		until[st] = true
-	}
-
-	timeout := time.Duration(msg.TimeoutMS) * time.Millisecond
-	if msg.TimeoutMS <= 0 {
-		timeout = defaultWaitTimeout
-	}
-	if timeout > maxWaitTimeout {
-		timeout = maxWaitTimeout
-	}
+	timeout := waitTimeout(msg.TimeoutMS)
 
 	w := &waiter{id: msg.WaitID, until: until, cn: cn, sid: msg.SessionID}
 	// Arm the timer BEFORE registering. Setting it afterwards races a transition

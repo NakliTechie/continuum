@@ -159,3 +159,149 @@ func TestWaitResolvesEveryMatchingWaiterOnce(t *testing.T) {
 		t.Fatalf("each waiter resolves exactly once; got %v", seen)
 	}
 }
+
+// §8.2 E6 — the sharpest edge. A session waiting on a human decision must not
+// receive a prompt: the approval dialog would read it as the answer, approving
+// or rejecting a tool call the sender never saw. Refuse, and send NOTHING.
+func TestPromptRefusedWhileBlockedOnADecision(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{"fake": {Command: fakeAgentBin, Transports: []string{"acp"}, ACPArgs: []string{}}},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{}, "env": msg{"FAKE_PERMISSION": "1"},
+		"client_id": "cid-blocked", "transport": protocol.TransportACP})
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	sid, _ := spawned["session_id"].(string)
+	tok, _ := spawned["session_token"].(string)
+
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "first"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypePermissionRequest })
+	recvUntil(t, c, func(f frame) bool {
+		ev, _ := f["event"].(string)
+		return f["type"] == "event" && ev == protocol.EventNeedsInput
+	})
+
+	// The supervisor now prompts a session that is sitting on a dialog.
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "yes please do it"})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrSessionBlocked {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrSessionBlocked)
+	}
+}
+
+// §8.2 — the wait is armed in the same frame, so the transition the prompt
+// causes cannot land in the gap between a separate prompt and wait.
+func TestPromptWithWaitResolvesAtomically(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "go",
+		"wait": msg{"until": []any{"done"}, "wait_id": "pw"}})
+
+	w := waited(t, c)
+	if w["state"] != protocol.StatusDone || w["wait_id"] != "pw" || w["timed_out"] != false {
+		t.Fatalf("waited = %v, want an atomic done for wait_id=pw", w)
+	}
+}
+
+// A malformed wait rides in on the prompt: refuse the whole frame rather than
+// prompting with a wait that could never resolve.
+func TestPromptWithABadWaitIsRefusedWhole(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "go",
+		"wait": msg{"until": []any{"nonsense"}}})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrBadWait {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrBadWait)
+	}
+	// And nothing was prompted: no turn ran, so no done event follows.
+	sendMsg(t, c, msg{"type": "seen", "session_id": sid, "session_token": tok})
+	sendMsg(t, c, msg{"type": "signal", "session_id": sid, "session_token": tok, "signal": "kill"})
+	f := recvUntil(t, c, func(fr frame) bool {
+		ev, _ := fr["event"].(string)
+		return fr["type"] == "event" && (ev == protocol.EventDone || ev == protocol.EventExited)
+	})
+	if ev, _ := f["event"].(string); ev != protocol.EventExited {
+		t.Fatalf("a refused prompt still ran a turn: %v", f)
+	}
+}
+
+// E8: a short caller timeout is honoured as a plain timeout on the wait the
+// prompt carried.
+func TestPromptShortTimeoutIsHonoured(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "go",
+		"wait": msg{"until": []any{"needs_input"}, "timeout_ms": 120, "wait_id": "short"}})
+
+	w := waited(t, c)
+	if w["timed_out"] != true || w["wait_id"] != "short" {
+		t.Fatalf("waited = %v, want a timed-out short wait", w)
+	}
+}
+
+// E7, as the build revised it: on ACP there is no stall guard, because that edge
+// belongs to blind keystroke injection (see the note in wait.go). A prompt the
+// agent swallows entirely is reported by the wait's own timeout — honest, and
+// it cannot mislabel a slow agent.
+func TestPromptSwallowedByTheAgentTimesOut(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{"fake": {Command: fakeAgentBin, Transports: []string{"acp"}, ACPArgs: []string{}}},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{},
+		"env": msg{"FAKE_SWALLOW_PROMPT": "1"}, "client_id": "cid-stall", "transport": protocol.TransportACP})
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	sid, _ := spawned["session_id"].(string)
+	tok, _ := spawned["session_token"].(string)
+
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "into the void",
+		"wait": msg{"until": []any{"done"}, "timeout_ms": 200, "wait_id": "void"}})
+
+	w := waited(t, c)
+	if w["timed_out"] != true || w["wait_id"] != "void" {
+		t.Fatalf("waited = %v, want a timed-out void wait", w)
+	}
+}
+
+// The bug that took the stall guard out: an agent that simply THINKS for longer
+// than any grace window must not be called stalled. A prompt does not move the
+// session's status by itself, and a slow agent emits nothing while it thinks, so
+// every signal available to a guard here fires on the common case.
+func TestPromptSlowAgentIsNotAStall(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{"fake": {Command: fakeAgentBin, Transports: []string{"acp"}, ACPArgs: []string{}}},
+	}
+	ts := httptest.NewServer(New(cfg).Handler())
+	t.Cleanup(ts.Close)
+
+	c := dialWS(t, ts)
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeHello })
+	sendMsg(t, c, msg{"type": "register", "registration_token": "test-registration-token"})
+	recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeRegistered })
+	sendMsg(t, c, msg{"type": "spawn", "agent": "fake", "cwd": t.TempDir(), "args": []any{},
+		"env": msg{"FAKE_SLOW_MS": "600"}, "client_id": "cid-slow", "transport": protocol.TransportACP})
+	spawned := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeSpawned })
+	sid, _ := spawned["session_id"].(string)
+	tok, _ := spawned["session_token"].(string)
+
+	sendMsg(t, c, msg{"type": "prompt", "session_id": sid, "session_token": tok, "text": "think hard",
+		"wait": msg{"until": []any{"done"}, "timeout_ms": 60000, "wait_id": "slow"}})
+
+	w := waited(t, c)
+	if w["state"] != protocol.StatusDone || w["timed_out"] != false {
+		t.Fatalf("a slow turn resolved wrongly: %v", w)
+	}
+}

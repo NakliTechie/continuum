@@ -59,6 +59,7 @@ type sessionEntry struct {
 	statusMu sync.Mutex
 	status   string
 	waiters  []*waiter // §8.1 coordination waiters; resolved on transition, drained on exit
+	statusN  int64     // bumped on every transition; the §8.2 stall guard asks whether anything moved
 
 	detMu      sync.Mutex
 	recentText []byte // rolling recent output for the loop detector (capped)
@@ -418,7 +419,16 @@ func (e *sessionEntry) setStatus(status string) bool {
 		return false
 	}
 	e.status = status
+	e.statusN++
 	return true
+}
+
+// statusSeq is a counter of transitions, for asking "has anything moved since?"
+// without caring what it moved to.
+func (e *sessionEntry) statusSeq() int64 {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.statusN
 }
 
 func (e *sessionEntry) currentStatus() string {
@@ -430,8 +440,9 @@ func (e *sessionEntry) currentStatus() string {
 	return e.status
 }
 
-// noteEventStatus maps an emitted event onto the session's status. Only
-// lifecycle events move it — child_spawned and friends are informational.
+// noteEventStatus maps an emitted event onto the session's status, and resolves
+// any waiter the transition satisfies. Only lifecycle events move it —
+// child_spawned and friends are informational.
 func noteEventStatus(e *sessionEntry, event string) {
 	switch event {
 	case protocol.EventExited, protocol.EventIdle, protocol.EventDone,
@@ -1023,6 +1034,19 @@ func (cn *conn) handlePrompt(raw json.RawMessage) {
 	}
 	if e.acp == nil {
 		cn.sendError(msg.SessionID, "bad_message", "prompt applies to structured sessions only")
+		return
+	}
+	// E6: never send input to a session waiting on a human decision. The pending
+	// approval dialog would read this prompt as its answer, approving or
+	// rejecting a tool call the sender never saw. Refuse, send nothing.
+	if blockedGuard(e) {
+		cn.sendError(msg.SessionID, protocol.ErrSessionBlocked, "session is waiting on a decision; answer it deliberately instead")
+		return
+	}
+	// §8.2: arm the wait BEFORE dispatching, so the transition this prompt
+	// causes cannot land in the gap between two separate frames.
+	if badWait := cn.armPromptWait(e, msg.SessionID, msg.Wait); badWait != "" {
+		cn.sendError(msg.SessionID, protocol.ErrBadWait, badWait)
 		return
 	}
 	ch, err := e.acp.Prompt(msg.Text)
