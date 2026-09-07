@@ -246,3 +246,49 @@ func (cn *conn) handleWait(raw json.RawMessage) {
 		w.resolve(state, false) // E1
 	}
 }
+
+// ---- §8.3 self-reported status -------------------------------------------
+
+// selfReportable is what a session may declare about itself. `exited` is absent
+// deliberately: a process ending is observed, not announced, and a session that
+// could declare its own exit could hide that it is still running.
+var selfReportable = map[string]bool{
+	protocol.StatusRunning:     true,
+	protocol.StatusIdle:        true,
+	protocol.StatusDone:        true,
+	protocol.StatusNeedsInput:  true,
+	protocol.StatusStalled:     true,
+	protocol.StatusRateLimited: true,
+	protocol.StatusUnknown:     true,
+}
+
+// handleReportStatus lets an agent declare its own lifecycle state, which is
+// more reliable than reading its output: the LooksLike* heuristics have
+// false-positives by construction, and an agent knows what it is doing.
+//
+// E9 — one status authority per session, never two. From the first self-report
+// the relay stops applying its own heuristics to that session for the rest of
+// the session's life. Merging the two sources produces a status that flickers
+// between them, and neither can be debugged.
+func (cn *conn) handleReportStatus(raw json.RawMessage) {
+	var msg protocol.ReportStatus
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		cn.sendError("", "bad_message", "malformed report_status")
+		return
+	}
+	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)
+	if e == nil {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
+		return
+	}
+	if !selfReportable[msg.State] {
+		cn.sendError(msg.SessionID, protocol.ErrBadStatus, "a session may not report itself as: "+msg.State)
+		return
+	}
+	e.takeStatusAuthority()
+	if !e.setStatus(msg.State) {
+		return // already there; a repeat report is not a transition
+	}
+	e.resolveWaiters(msg.State)
+	cn.srv.deliverEvent(msg.SessionID, msg.State, nil)
+}

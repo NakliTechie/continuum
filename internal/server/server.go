@@ -59,7 +59,10 @@ type sessionEntry struct {
 	statusMu sync.Mutex
 	status   string
 	waiters  []*waiter // §8.1 coordination waiters; resolved on transition, drained on exit
-	statusN  int64     // bumped on every transition; the §8.2 stall guard asks whether anything moved
+	statusN  int64     // bumped on every transition
+	// selfReported: this session declares its own status (§8.3), so the relay's
+	// output heuristics are switched off for it. E9 — one authority, never two.
+	selfReported bool
 
 	detMu      sync.Mutex
 	recentText []byte // rolling recent output for the loop detector (capped)
@@ -250,6 +253,12 @@ func (s *Server) runSession(id string, sess *pty.Session) {
 	go sess.Run(
 		func(seq int, b []byte) {
 			s.deliverOutput(id, seq, b)
+			// E9: a session that declares its own status is the only authority on
+			// it. Guessing from output alongside the declaration makes the status
+			// flicker between two sources, and neither can be debugged.
+			if e := s.entry(id); e != nil && e.hasStatusAuthority() {
+				return
+			}
 			if shims.LooksLikeNeedsInput(b) {
 				s.deliverEvent(id, protocol.EventNeedsInput, nil)
 			} else if shims.LooksLikeRateLimited(b) {
@@ -431,6 +440,22 @@ func (e *sessionEntry) statusSeq() int64 {
 	return e.statusN
 }
 
+// takeStatusAuthority switches this session from relay-guessed status to
+// agent-declared. One-way for the session's life: an agent that reports once and
+// then goes quiet is better served by a stale declared status than by heuristics
+// resuming underneath it and fighting the declaration.
+func (e *sessionEntry) takeStatusAuthority() {
+	e.statusMu.Lock()
+	e.selfReported = true
+	e.statusMu.Unlock()
+}
+
+func (e *sessionEntry) hasStatusAuthority() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return e.selfReported
+}
+
 func (e *sessionEntry) currentStatus() string {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
@@ -598,6 +623,8 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.handleSeen(raw)
 	case protocol.TypeWait:
 		cn.handleWait(raw)
+	case protocol.TypeReportStatus:
+		cn.handleReportStatus(raw)
 	case protocol.TypeInput:
 		cn.handleInput(raw)
 	case protocol.TypeSignal:

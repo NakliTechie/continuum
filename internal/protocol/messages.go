@@ -42,9 +42,13 @@ const (
 	// TypeWait / TypeWaited: park until a session reaches one of the named
 	// lifecycle states (spec §8.1). Server-owned and event-driven — the relay
 	// resolves on a transition it already tracks, so no client polls.
-	TypeWait     = "wait"
-	TypeWaited   = "waited"
-	TypeAttached = "attached"
+	// TypeReportStatus: an agent declaring its own lifecycle state (spec §8.3).
+	// Authoritative — from the first report the relay stops second-guessing that
+	// session with output heuristics (E9: one status authority, never two).
+	TypeReportStatus = "report_status"
+	TypeWait         = "wait"
+	TypeWaited       = "waited"
+	TypeAttached     = "attached"
 
 	// protocol 1.2: structured sessions (transport "acp")
 	TypeSessionUpdate      = "session_update"
@@ -81,6 +85,9 @@ const (
 	// vocabulary. Refused rather than silently narrowed — a wait that can never
 	// resolve is indistinguishable from a hang.
 	ErrBadWait = "bad_wait"
+	// ErrBadStatus: a self-report named a state outside the lifecycle vocabulary,
+	// or one a session may not declare about itself.
+	ErrBadStatus = "bad_status"
 	// ErrSessionBlocked: the session is waiting on a human decision, so a prompt
 	// was refused and NOTHING was sent (spec §8.2.1 E6). An approval dialog reads
 	// the next input as its answer, so a prompt here would approve or reject a
@@ -220,6 +227,18 @@ type Input struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token"`
 	Data         string `json:"data"`
+}
+
+// ReportStatus (agent -> relay) declares the session's own lifecycle state.
+// More reliable than the relay's LooksLike* heuristics, which is the point: an
+// agent knows whether it is working, and guessing from output has
+// false-positives. Message is display-only and never drives a wait.
+type ReportStatus struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
+	State        string `json:"state"`
+	Message      string `json:"message,omitempty"`
 }
 
 // Wait (client -> relay) parks until the named session reaches one of `Until`.

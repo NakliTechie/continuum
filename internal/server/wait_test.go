@@ -305,3 +305,77 @@ func TestPromptSlowAgentIsNotAStall(t *testing.T) {
 		t.Fatalf("a slow turn resolved wrongly: %v", w)
 	}
 }
+
+// §8.3 — an agent declaring its own state is authoritative, and the declaration
+// resolves waits like any other transition.
+func TestReportStatusResolvesAWait(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "wait", "session_id": sid, "session_token": tok, "until": []any{"needs_input"}, "wait_id": "rs"})
+	sendMsg(t, c, msg{"type": "report_status", "session_id": sid, "session_token": tok, "state": "needs_input", "message": "which branch?"})
+
+	w := waited(t, c)
+	if w["state"] != protocol.StatusNeedsInput || w["wait_id"] != "rs" {
+		t.Fatalf("waited = %v, want the declared state", w)
+	}
+}
+
+// E3's producer: `unknown` is declarable, and resolves a wait only when the
+// caller named it. Nothing about it is implicit.
+func TestReportStatusUnknownResolvesOnlyWhenNamed(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	// This wait does NOT name unknown, so the report must not satisfy it.
+	sendMsg(t, c, msg{"type": "wait", "session_id": sid, "session_token": tok,
+		"until": []any{"done"}, "timeout_ms": 250, "wait_id": "notunknown"})
+	sendMsg(t, c, msg{"type": "report_status", "session_id": sid, "session_token": tok, "state": "unknown"})
+
+	w := waited(t, c)
+	if w["timed_out"] != true {
+		t.Fatalf("unknown satisfied a wait that never named it: %v", w)
+	}
+	// Named explicitly, it resolves.
+	sendMsg(t, c, msg{"type": "wait", "session_id": sid, "session_token": tok, "until": []any{"unknown"}, "wait_id": "named"})
+	w2 := waited(t, c)
+	if w2["state"] != protocol.StatusUnknown || w2["wait_id"] != "named" {
+		t.Fatalf("waited = %v, want an immediate unknown", w2)
+	}
+}
+
+// A session may not declare its own exit: a process ending is observed, not
+// announced, and a session that could announce it could hide that it is running.
+func TestReportStatusRefusesExited(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "report_status", "session_id": sid, "session_token": tok, "state": "exited"})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrBadStatus {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrBadStatus)
+	}
+}
+
+func TestReportStatusRefusesAnUnknownState(t *testing.T) {
+	c, sid, tok := waitTestSession(t)
+	sendMsg(t, c, msg{"type": "report_status", "session_id": sid, "session_token": tok, "state": "vibing"})
+	e := recvUntil(t, c, func(f frame) bool { return f["type"] == protocol.TypeError })
+	if e["code"] != protocol.ErrBadStatus {
+		t.Fatalf("error code = %v, want %s", e["code"], protocol.ErrBadStatus)
+	}
+}
+
+// E9: after a self-report the relay's own heuristics stand down for that
+// session, so the two sources cannot fight over the status.
+func TestReportStatusTakesAuthorityFromTheHeuristics(t *testing.T) {
+	cfg := &config.Config{
+		Name: "test-relay", Listen: "127.0.0.1:0", Tmux: "off", RegistrationToken: "test-registration-token",
+		Agents: map[string]config.Agent{"sh": {Command: "/bin/sh"}},
+	}
+	srv := New(cfg)
+	e := &sessionEntry{token: "t"}
+	srv.addSession(e, "s1")
+
+	if e.hasStatusAuthority() {
+		t.Fatal("a fresh session must not claim status authority")
+	}
+	e.takeStatusAuthority()
+	if !e.hasStatusAuthority() {
+		t.Fatal("a self-reporting session must hold status authority")
+	}
+}
