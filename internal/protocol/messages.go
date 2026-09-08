@@ -370,6 +370,7 @@ type SessionInfo struct {
 	Transport       string `json:"transport,omitempty"`         // protocol 1.2; absent ⇒ pty (so re-attach doesn't guess)
 	ParentSessionID string `json:"parent_session_id,omitempty"` // protocol 1.3; present for a child (re-attach rebuilds the tree)
 	AgentSessionID  string `json:"agent_session_id,omitempty"`  // the agent's OWN session reference; feed back as spawn.resume_agent_session
+	Status          string `json:"status,omitempty"`            // the relay's tracked lifecycle status, so a re-attach restores done/idle instead of assuming running
 }
 
 // Sessions (relay -> browser) lists live sessions, sent right after `registered`.

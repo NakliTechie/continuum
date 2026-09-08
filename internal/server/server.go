@@ -184,7 +184,7 @@ func (s *Server) listSessions() []protocol.SessionInfo {
 		if e.acp != nil {
 			agentSession = e.acp.ACPSessionID
 		}
-		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport, ParentSessionID: e.parent, AgentSessionID: agentSession})
+		out = append(out, protocol.SessionInfo{SessionID: id, Agent: e.agent, StartedAt: e.startedAt.UTC().Format(time.RFC3339), PID: e.pid, Transport: transport, ParentSessionID: e.parent, AgentSessionID: agentSession, Status: e.currentStatus()})
 	}
 	return out
 }
