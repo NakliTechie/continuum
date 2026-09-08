@@ -360,8 +360,15 @@ func (s *Server) emitChildSpawned(parentID, childID string) {
 	}
 	frame := protocol.Event{Type: protocol.TypeEvent, SessionID: parentID, Event: protocol.EventChildSpawned, ChildSessionID: childID, At: time.Now().UTC().Format(time.RFC3339)}
 	if e.acp != nil {
-		if b, err := json.Marshal(frame); err == nil {
-			_, _ = e.trySend(b)
+		b, err := json.Marshal(frame)
+		if err != nil {
+			return
+		}
+		// Same drop-with-marker rule as every other structured frame (§C2): a
+		// child_spawned lost to backpressure bumps the counter and queues a
+		// frames_dropped marker, instead of vanishing silently (relay-L2).
+		if sent, closed := e.trySend(b); !sent && !closed {
+			s.dropStructured(e, parentID)
 		}
 		return
 	}
