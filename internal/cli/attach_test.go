@@ -39,11 +39,15 @@ type attachFixture struct {
 	screens      int
 	failInput    bool
 	hangScreen   bool
+	controlled   bool
+	color        bool
 	capabilities []string
 }
 
 func newAttachFixture(t *testing.T) (string, *attachFixture) {
 	t.Helper()
+	// This fixture emulates a capable outer terminal, independent of the test runner.
+	t.Setenv("TERM", "xterm-256color")
 	f := &attachFixture{capabilities: []string{"terminal_screen_v1", "terminal_input_base64", "control_renewal"}}
 	frame := terminal.Snapshot{Engine: terminal.Name, Cols: 80, Rows: 23, Revision: 1, Cursor: terminal.Cursor{Visible: true, X: 5, Y: 1}, Lines: make([]string, 23), ANSI: make([]string, 23)}
 	frame.Lines[0] = "ATTACH_READY"
@@ -61,6 +65,7 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 		}
 		hang := f.hangScreen && f.screens > 1 && q.Operation == "screen"
 		capabilities := append([]string(nil), f.capabilities...)
+		controlled, color := f.controlled, f.color
 		fail := f.failInput
 		f.mu.Unlock()
 		if hang {
@@ -81,10 +86,18 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 		case "status":
 			result = api.Result("", map[string]any{"capabilities": capabilities})
 		case "screen":
-			result = api.Result("", screenView{Block: attachBlock, Host: "test-host", State: "active", Frame: frame})
+			current := frame
+			if color {
+				current.ANSI = append([]string(nil), frame.ANSI...)
+				current.ANSI[0] = "\x1b[31mATTACH_READY\x1b[0m"
+			}
+			result = api.Result("", screenView{Block: attachBlock, Host: "test-host", State: "active", Frame: current})
 			result.Durability = "volatile"
 		case "acquire", "takeover":
 			result = api.Result(q.RequestID, map[string]string{"lease": "private-attach-lease"})
+			if controlled {
+				result = api.Error(q.RequestID, "conflict", "controlled", "control is held", "takeover")
+			}
 		case "input":
 			if fail {
 				result = api.Error(q.RequestID, "indeterminate", "transport_lost", "input outcome is unknown", "status")

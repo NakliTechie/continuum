@@ -158,6 +158,15 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
 	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
+	if command == "attach" {
+		f.Usage = func() { fmt.Fprint(diag, attachHelp) }
+		for _, arg := range args[1:] {
+			if arg == "--help" || arg == "-h" {
+				fmt.Fprint(out, attachHelp)
+				return 0
+			}
+		}
+	}
 	if err := f.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(out, help)

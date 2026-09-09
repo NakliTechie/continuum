@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/NakliTechie/continuum/api"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/terminal"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"golang.org/x/sys/unix"
 )
@@ -69,13 +71,18 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		fmt.Fprintln(diag, "attach requires a terminal for stdin and stdout; use screen --json or events for pipes")
 		return 2
 	}
+	if os.Getenv("TERM") == "dumb" {
+		fmt.Fprintf(diag, "attach requires a terminal with cursor controls; inspect output with:\n  %s\n", clientCommand("screen", dir, block))
+		return api.Exit("unsupported")
+	}
+	noColor := os.Getenv("NO_COLOR") != ""
 	inputFD, outputFD := input.Fd(), output.Fd()
 	cols, rows, err := term.GetSize(outputFD)
 	if err != nil {
 		fmt.Fprintln(diag, "cannot read terminal size:", err)
 		return 5
 	}
-	size, err := terminalViewport(cols, rows)
+	size, err := attachViewport(cols, rows)
 	if err != nil {
 		fmt.Fprintln(diag, err)
 		return 2
@@ -141,6 +148,10 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		}
 		r := rpc(api.Request{Operation: op, Block: block, RequestID: journal.ID()})
 		if r.Class != "ok" {
+			if r.Code == "controlled" {
+				fmt.Fprintf(diag, "Block %s already has a controller.\nWatch: %s --observer\nReplace control: %s --takeover\n", block, clientCommand("attach", dir, block), clientCommand("attach", dir, block))
+				return api.Exit(r.Class)
+			}
 			return render(r, false, out, diag)
 		}
 		var result struct {
@@ -199,7 +210,17 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		_, _ = unix.FcntlInt(outputFD, unix.F_SETFL, outFlags)
 		_ = term.Restore(inputFD, old)
 	}
-	defer cleanup()
+	var detached atomic.Bool
+	defer func() {
+		cleanup()
+		if detached.Load() {
+			command := clientCommand("attach", dir, block)
+			if observer {
+				command += " --observer"
+			}
+			fmt.Fprintf(diag, "Detached from block %s. Reconnect: %s\n", block, command)
+		}
+	}()
 	if _, err = unix.FcntlInt(inputFD, unix.F_SETFL, inFlags|unix.O_NONBLOCK); err != nil {
 		fmt.Fprintln(diag, "cannot configure terminal input:", err)
 		return 5
@@ -221,7 +242,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		readTerminalInput(inputCtx, cancel, int(inputFD), observer, packets, inputErrors)
+		readTerminalInput(inputCtx, func() { detached.Store(true); cancel() }, int(inputFD), observer, packets, inputErrors)
 	}()
 	readerStop = func() { inputCancel(); <-readerDone }
 	fail := func(r api.Response) int { cleanup(); return render(r, false, out, diag) }
@@ -233,20 +254,29 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 	lastRevision := uint64(0)
 	haveFrame := false
 	disconnected := false
-	paint := func(message string) error { return writeFrame(frameOut, view.Frame, size, message, observer) }
+	paint := func(message string) error {
+		frame := view.Frame
+		if noColor {
+			frame.ANSI = make([]string, len(view.Frame.ANSI))
+			for i, row := range view.Frame.ANSI {
+				frame.ANSI[i] = ansi.Strip(row)
+			}
+		}
+		return writeFrame(frameOut, frame, size, message, observer)
+	}
 	footer := func() string {
 		role := "Control"
 		if observer {
 			role = "Observer"
 		}
-		text := role + " • " + block + " • Ctrl-] detach"
+		text := "Ctrl-] detach • " + role
 		if view.Frame.Cols > size.cols || view.Frame.Rows > size.rows {
 			text += " • cropped"
 		}
 		if view.CaptureDegraded {
 			text += " • recording degraded"
 		}
-		return text
+		return text + " • " + block
 	}
 	sendPending := func() *api.Response {
 		if len(data) == 0 {
@@ -293,7 +323,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 				fmt.Fprintln(diag, "terminal resize query failed:", err)
 				return 5
 			}
-			next, err := terminalViewport(physicalCols, physicalRows)
+			next, err := attachViewport(physicalCols, physicalRows)
 			if err != nil {
 				cleanup()
 				fmt.Fprintln(diag, err)
@@ -358,7 +388,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 				if view.ExitCode != nil {
 					code = *view.ExitCode
 				}
-				fmt.Fprintf(diag, "Block %s exited (code %d). Final output: continuum screen --state %q --block %s\n", block, code, dir, block)
+				fmt.Fprintf(diag, "Block %s exited (code %d). Final output: %s\n", block, code, clientCommand("screen", dir, block))
 				if code < 0 || code > 255 {
 					return 1
 				}
