@@ -20,6 +20,8 @@ The baseline runner uses the existing local Menagerie Git object database, extra
 | Approval guard | While the fake ACP agent asks permission, a task prompt is refused with session_blocked; explicit permission response completes the turn. |
 | Subtree kill | Parent and child both exit after an authorized subtree stop. |
 
+Legacy PTY input is raw UTF-8 in `input.data`; output is base64 in `output.data`. Preserve this directional asymmetry.
+
 Frame waits have one overall deadline and a frame-count cap; unrelated output cannot extend a test forever. Failure messages avoid dumping authentication-bearing frames. A missing configured relay/fake-agent path fails the tagged suite rather than silently skipping.
 
 ## Boundaries
@@ -27,3 +29,21 @@ Frame waits have one overall deadline and a frame-count cap; unrelated output ca
 This suite covers loopback macOS/Linux execution with tmux off and a fake ACP process. It does not validate browser rendering, real provider behavior, tmux adoption across restart, full history recovery, operating-system login, multiple read-only viewers, WAN resilience, or the future adapter against every legacy frame. Add those cases as the corresponding slice arrives; this is not a complete migration gate.
 
 The future runtime can be supplied through explicit executable paths; the documented baseline runner establishes the current reference. Never point the suite at a live daemon: it always launches its own child from the supplied executable.
+
+## Run
+
+On macOS or Linux with Go 1.26.2, Git, Python 3 and tar:
+
+```sh
+python3 scripts/check_legacy.py --source ../menagerie
+```
+
+The runner verifies the pinned Git objects, builds temporary executables and runs the tagged suite with the Go race detector on the test client. The relay executables use their normal build; this is not a relay race audit. The local Go module cache may need the declared dependencies on its first run. There are no model-provider calls.
+
+For a future candidate runtime, build a compatible fake ACP helper and set absolute `CONTINUUM_TEST_RELAY` and `CONTINUUM_TEST_ACP` executable paths, then run `go test -race -tags=legacyintegration -count=1 -timeout=90s ./compat`. These variables name binaries, not a live endpoint. Tests always start their own isolated relay. The tagged suite is opt-in; a plain `go test ./...` is not conformance evidence.
+
+## Observed validation — 2026-09-09
+
+The baseline runner verified all 42 hashes at Menagerie revision `837a3ee5fcf92c71a84dfefce062e6a9cf9a2457`, built disposable relay/fake-agent executables and passed all six Go integration tests on macOS (test-client race detector enabled). This includes PTY output emitted while every WebSocket client was disconnected and replayed after reconnect to the same PID. Linux, real provider agents, browser compatibility and the future Continuum runtime were not exercised.
+
+The initial run exposed a test-client encoding mistake: legacy input uses raw text, while output uses base64. Correcting the test client produced the passing run; no Menagerie implementation change was needed.

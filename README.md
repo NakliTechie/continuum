@@ -38,7 +38,9 @@ This scaffold does not replace the installed relay, copy its implementation, or 
 
 ## Current status
 
-The first spec draft and source inventory are present. No daemon, CLI, remote listener, migration, or service has been installed or implemented. The first implementation milestone is a compatibility harness around the existing relay, followed by a bounded vertical slice with two viewers and recoverable events.
+The draft specification, agent contract, pinned source inventory and first black-box compatibility harness are present. Six integration tests passed on macOS against the pinned Menagerie relay using disposable processes and a fake ACP agent. Run them with `python3 scripts/check_legacy.py`; see [coverage and limits](docs/legacy-conformance.md).
+
+No Continuum daemon or CLI has been implemented, and no installed service has been changed. Next: settle the runtime boundaries and expand compatibility coverage, then build a bounded vertical slice with two viewers and recoverable events.
 
 Inherited code must retain Menagerie's AGPL-3.0 notices and attribution. Its license text is retained in this scaffold; no Menagerie runtime code has been copied.
 
