@@ -9,6 +9,8 @@
 //	menagerie-relay service install  run the relay always-on (launchd / systemd)
 //	menagerie-relay init             generate ~/.menagerie/relay.toml + a token only
 //	menagerie-relay agents           list the agents this relay detected on PATH
+//	menagerie-relay materialise      materialise a workspace from a fleet spec
+//	                                 (--dry-run prints the plan and touches nothing)
 //	menagerie-relay token print      re-print the registration token
 //	menagerie-relay token rotate     generate a new registration token
 package main
@@ -54,6 +56,8 @@ func main() {
 		cmdToken(path, args[1:])
 	case "service":
 		cmdService(path, args[1:])
+	case "materialise", "materialize":
+		cmdMaterialise(args[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:

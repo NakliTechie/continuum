@@ -58,8 +58,14 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	res := &Result{}
 
 	// --- 1. ports (via the provisioner, which owns allocation and the record) ---
-	rec, err := e.Prov.Provision(spec, repoRoot, name)
-	if err != nil {
+	// A dry run never allocates, never creates a worktree and never writes a
+	// record: it computes the plan against a fake allocator, so the output is
+	// deterministic and the box is untouched.
+	var rec *workspace.Record
+	var err error
+	if e.DryRun {
+		rec = dryRecord(spec, repoRoot, name, e.Prov.Root)
+	} else if rec, err = e.Prov.Provision(spec, repoRoot, name); err != nil {
 		return nil, err
 	}
 	res.Workspace = rec
@@ -144,13 +150,20 @@ func (e *Engine) materialiseFile(f fleet.File, rec *workspace.Record, repoRoot s
 	if !filepath.IsAbs(src) {
 		src = filepath.Join(repoRoot, src)
 	}
+	action := "copy"
+	if f.Template != "" {
+		action = "render"
+	}
+	// A dry run reports what it would do without reading the repo or writing the
+	// workspace: the plan is about the graph, not about the box's current files.
+	if e.DryRun {
+		return Step{Stage: "files", Action: action, Detail: f.To, Skipped: true, Reason: "dry run"}, nil
+	}
 	b, err := e.FS.ReadFile(src)
 	if err != nil {
 		return Step{}, fmt.Errorf("reading %s: %w", src, err)
 	}
-	action := "copy"
 	if f.Template != "" {
-		action = "render"
 		b = []byte(interpolate(string(b), rec.Vars))
 	}
 	if err := e.FS.WriteFile(dest, b, 0o600); err != nil {
@@ -304,4 +317,40 @@ func (e *Engine) serviceMark(scope string) error {
 	cs := e.loadCache()
 	cs.Services[scope] = true
 	return e.saveCache(cs)
+}
+
+// dryRecord is the fake port allocator: every declared port resolves to the low
+// end of its range. Deterministic on purpose — a plan you cannot diff is not a
+// plan, and the golden file is what proves the graph did not shift.
+func dryRecord(spec *fleet.Spec, repoRoot, name, root string) *workspace.Record {
+	branch := spec.Workspace.BranchPrefix + name
+	ports := map[string]int{}
+	for _, p := range spec.Workspace.Materialise.Ports {
+		ports[p.Name] = p.Range[0]
+	}
+	vars := map[string]string{"WORKSPACE": name, "BRANCH": branch, "REPO_ROOT": repoRoot}
+	for k, v := range ports {
+		vars[k] = fmt.Sprint(v)
+	}
+	return &workspace.Record{
+		Name: name, Repo: repoRoot, Branch: branch, Path: filepath.Join(root, name),
+		Ports: ports, Vars: vars, State: workspace.StateProvisioning,
+	}
+}
+
+// RenderPlan prints a run's steps as a stable, ordered plan — the dry run's
+// output and the golden file's shape.
+func RenderPlan(spec *fleet.Spec, res *Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# dry run: %s (%s)\n", spec.Name, spec.Spec)
+	fmt.Fprintf(&b, "# workspace %s on branch %s\n", res.Workspace.Name, res.Workspace.Branch)
+	for _, s := range res.Steps {
+		fmt.Fprintf(&b, "%-9s %-9s %s", s.Stage, s.Action, s.Detail)
+		if s.Skipped {
+			fmt.Fprintf(&b, "   [skipped: %s]", s.Reason)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "# would end in state: %s\n", res.State)
+	return b.String()
 }
