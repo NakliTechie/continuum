@@ -31,6 +31,7 @@ import (
 
 	"github.com/NakliTechie/continuum/internal/acp"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/protocol"
 	"github.com/NakliTechie/continuum/internal/pty"
 	"github.com/NakliTechie/continuum/internal/shims"
@@ -68,6 +69,10 @@ type sessionEntry struct {
 	// selfReported: this session declares its own status (§8.3), so the relay's
 	// output heuristics are switched off for it. E9 — one authority, never two.
 	selfReported bool
+	turn         uint64        // prompt generation, guarded by statusMu
+	promptMu     sync.Mutex    // serialize prompt admission/completion and ACP exit
+	promptActive bool          // guarded by promptMu
+	promptDone   chan struct{} // completion joined before publishing ACP exit; guarded by promptMu
 
 	detMu      sync.Mutex
 	recentText []byte // rolling recent output for the loop detector (capped)
@@ -75,11 +80,13 @@ type sessionEntry struct {
 
 	// Structured-session outbound path: bounded queue, drop-with-marker
 	// (§C2) — a dropped-frames marker in the stream is honest, an OOM is not.
-	outMu   sync.Mutex
-	outbox  chan []byte // pre-marshaled menagerie frames, single pump consumer
-	seq     int64       // monotonic across session_update/permission_request frames
-	tail    [][]byte    // recently delivered frames, replayed on re-attach (capped)
-	dropped int         // frames dropped since the last marker was queued
+	outMu     sync.Mutex
+	outbox    chan []byte // pre-marshaled menagerie frames, single pump consumer
+	outBytes  int         // queued bytes, guarded by outMu
+	tailBytes int         // retained replay bytes, guarded by outMu
+	seq       int64       // monotonic across session_update/permission_request frames
+	tail      [][]byte    // recently delivered frames, replayed on re-attach (capped)
+	dropped   int         // frames dropped since the last marker was queued
 	// dropNotified is set while a backpressure episode is being reported, so the
 	// client gets one marker per episode instead of one per lost frame. Cleared
 	// as soon as a frame gets through again.
@@ -395,7 +402,7 @@ func (s *Server) emitChildSpawned(parentID, childID string) {
 	}
 	frame := protocol.Event{Type: protocol.TypeEvent, SessionID: parentID, Event: protocol.EventChildSpawned, ChildSessionID: childID, At: time.Now().UTC().Format(time.RFC3339)}
 	if e.acp != nil {
-		b, err := json.Marshal(frame)
+		b, err := jsonwire.Marshal(frame)
 		if err != nil {
 			return
 		}
@@ -512,7 +519,7 @@ func (e *sessionEntry) currentStatus() string {
 // child_spawned and friends are informational.
 func noteEventStatus(e *sessionEntry, event string) {
 	switch event {
-	case protocol.EventExited, protocol.EventIdle, protocol.EventDone,
+	case protocol.EventRunning, protocol.EventUnknown, protocol.EventExited, protocol.EventIdle, protocol.EventDone,
 		protocol.EventNeedsInput, protocol.EventStalled, protocol.EventRateLimited:
 		if e.setStatus(event) {
 			e.resolveWaiters(event)
@@ -904,7 +911,8 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", "unsupported_transport", "agent "+msg.Agent+" does not speak acp")
 		return
 	}
-	cmd := exec.Command(ag.Command, append(ag.ACPArgsOrDefault(), msg.Args...)...)
+	argv := append(append([]string(nil), ag.ACPArgsOrDefault()...), msg.Args...)
+	cmd := exec.Command(ag.Command, argv...)
 	cmd.Dir = msg.Cwd
 	cmd.Env = shims.MergeEnv(msg.Env)
 
@@ -948,11 +956,12 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	}
 	s.addSession(e, id)
 
-	sess.SetOnUpdate(func(params json.RawMessage) { s.deliverStructured(id, params) })
-	sess.OnPermissionRequest = func(reqID string, params json.RawMessage) {
+	sess.SetSinks(func(params json.RawMessage) { s.deliverStructured(id, params) }, func(reqID string, params json.RawMessage) {
+		e.promptMu.Lock()
+		defer e.promptMu.Unlock()
 		s.deliverPermissionRequest(id, reqID, params)
 		s.queueStructuredEvent(e, id, protocol.EventNeedsInput, nil)
-	}
+	})
 
 	_ = cn.send(protocol.Spawned{
 		Type:            protocol.TypeSpawned,
@@ -985,8 +994,19 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 
 	go func() {
 		sess.Run(func(code int) {
-			if sess.ReadError() != nil && s.modern != nil {
-				s.modern.degraded.Store(true)
+			// closeFiles has delivered every response (or nil) before onExit.
+			// Let the prompt owner record that outcome before removing entry.
+			e.promptMu.Lock()
+			pending := e.promptDone
+			e.promptMu.Unlock()
+			if pending != nil {
+				<-pending
+			}
+			e.promptMu.Lock()
+			defer e.promptMu.Unlock()
+			e.promptActive = false
+			if err := sess.ReadError(); err != nil {
+				s.recordCaptureLoss(id, err)
 			}
 			c := code
 			s.queueStructuredEvent(e, id, protocol.EventExited, &c)
@@ -1007,13 +1027,21 @@ func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *i
 }
 
 const (
-	outboxCapacity = 384 // ≥ tailCapacity so a re-attach replay always fits
-	tailCapacity   = 256
+	outboxCapacity     = 384 // ≥ tailCapacity so a re-attach replay always fits
+	tailCapacity       = 256
+	outboxByteCapacity = 16 << 20
+	tailByteCapacity   = 16 << 20
 )
 
 // pumpStructured is the single consumer of a session's outbound queue.
 func (s *Server) pumpStructured(e *sessionEntry) {
 	for b := range e.outbox {
+		e.outMu.Lock()
+		e.outBytes -= len(b)
+		if e.outBytes < 0 {
+			e.outBytes = 0
+		}
+		e.outMu.Unlock()
 		if sub := e.subscriber(); sub != nil {
 			if err := sub.sendRaw(b); err != nil {
 				log.Printf("structured send %s: %v", e.agent, err)
@@ -1071,13 +1099,13 @@ func turnUsageUpdate(sessionID string, usage json.RawMessage) json.RawMessage {
 // capture to the re-attach tail first, then queue for delivery; drop honestly
 // when a slow socket outruns the bound.
 func (s *Server) deliverStructured(id string, params json.RawMessage) {
-	s.record(id, "session_update", params)
+	s.recordStructured(id, "session_update", params)
 	e := s.entry(id)
 	if e == nil || e.acp == nil {
 		return
 	}
 	frame := protocol.SessionUpdate{Type: protocol.TypeSessionUpdate, SessionID: id, Seq: int(e.nextSeq()), Acp: params}
-	b, err := json.Marshal(frame)
+	b, err := jsonwire.Marshal(frame)
 	if err != nil {
 		return
 	}
@@ -1088,13 +1116,13 @@ func (s *Server) deliverStructured(id string, params json.RawMessage) {
 }
 
 func (s *Server) deliverPermissionRequest(id, requestID string, params json.RawMessage) {
-	s.record(id, "permission_request", map[string]any{"request_id": requestID, "acp": params})
+	s.recordStructured(id, "permission_request", map[string]any{"request_id": requestID, "acp": params})
 	e := s.entry(id)
 	if e == nil || e.acp == nil {
 		return
 	}
 	frame := protocol.PermissionRequest{Type: protocol.TypePermissionRequest, SessionID: id, RequestID: requestID, Seq: int(e.nextSeq()), Acp: params}
-	b, err := json.Marshal(frame)
+	b, err := jsonwire.Marshal(frame)
 	if err != nil {
 		return
 	}
@@ -1168,8 +1196,12 @@ func (e *sessionEntry) trySend(b []byte) (sent, closed bool) {
 	if e.closed {
 		return false, true
 	}
+	if e.outBytes+len(b) > outboxByteCapacity {
+		return false, false
+	}
 	select {
 	case e.outbox <- b:
+		e.outBytes += len(b)
 		// A frame got through, so the backpressure episode is over: the next drop
 		// is a new episode and earns its own marker.
 		e.dropNotified = false
@@ -1215,8 +1247,11 @@ func (e *sessionEntry) appendTail(b []byte) {
 	cp := make([]byte, len(b))
 	copy(cp, b)
 	e.tail = append(e.tail, cp)
-	if len(e.tail) > tailCapacity {
-		e.tail = e.tail[len(e.tail)-tailCapacity:]
+	e.tailBytes += len(cp)
+	for len(e.tail) > 0 && (len(e.tail) > tailCapacity || e.tailBytes > tailByteCapacity) {
+		e.tailBytes -= len(e.tail[0])
+		e.tail[0] = nil
+		e.tail = e.tail[1:]
 	}
 }
 
@@ -1229,71 +1264,6 @@ func (e *sessionEntry) tailSnapshot() [][]byte {
 		out[i] = append([]byte(nil), b...)
 	}
 	return out
-}
-
-func (cn *conn) handlePrompt(raw json.RawMessage) {
-	var msg protocol.Prompt
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		cn.sendError(msg.SessionID, "bad_message", "malformed prompt")
-		return
-	}
-	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)
-	if e == nil {
-		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "unknown session or bad token")
-		return
-	}
-	if e.acp == nil {
-		cn.sendError(msg.SessionID, "bad_message", "prompt applies to structured sessions only")
-		return
-	}
-	// E6: never send input to a session waiting on a human decision. The pending
-	// approval dialog would read this prompt as its answer, approving or
-	// rejecting a tool call the sender never saw. Refuse, send nothing.
-	if blockedGuard(e) {
-		cn.sendError(msg.SessionID, protocol.ErrSessionBlocked, "session is waiting on a decision; answer it deliberately instead")
-		return
-	}
-	// §8.2: arm the wait BEFORE dispatching, so the transition this prompt
-	// causes cannot land in the gap between two separate frames.
-	if badWait := cn.armPromptWait(e, msg.SessionID, msg.Wait); badWait != "" {
-		cn.sendError(msg.SessionID, protocol.ErrBadWait, badWait)
-		return
-	}
-	ch, err := e.acp.Prompt(msg.Text)
-	if err != nil {
-		cn.sendError(msg.SessionID, "bad_message", err.Error())
-		return
-	}
-	id := msg.SessionID
-	go func() {
-		resp := <-ch
-		stop := ""
-		var r struct {
-			StopReason string          `json:"stopReason"`
-			Usage      json.RawMessage `json:"usage"`
-		}
-		if resp != nil && resp.Result != nil {
-			_ = json.Unmarshal(resp.Result, &r)
-			stop = r.StopReason
-		}
-		log.Printf("prompt done %s (stopReason=%q)", id, stop)
-		if e := cn.srv.entry(id); e != nil && e.acp != nil {
-			// Turn token usage arrives in the prompt result, not a notification —
-			// re-surface it through the funnel before the idle event so the
-			// instrument bar's token counters never overtake turn-end.
-			if len(r.Usage) > 0 && string(r.Usage) != "null" {
-				frame := turnUsageUpdate(id, r.Usage)
-				e.outMu.Lock()
-				e.lastTurnUsage = frame
-				e.outMu.Unlock()
-				cn.srv.deliverStructured(id, frame)
-			}
-			// Finished, and nobody has looked yet — that is `done`, not `idle`
-			// (spec §8.1.1 E5). A `seen` frame from a client that actually
-			// showed it to a human is what demotes it.
-			cn.srv.queueStructuredEvent(e, id, protocol.EventDone, nil)
-		}
-	}()
 }
 
 func (cn *conn) handlePermissionResponse(raw json.RawMessage) {
@@ -1311,8 +1281,20 @@ func (cn *conn) handlePermissionResponse(raw json.RawMessage) {
 		cn.sendError(msg.SessionID, "bad_message", "permission_response applies to structured sessions only")
 		return
 	}
+	e.promptMu.Lock()
+	defer e.promptMu.Unlock()
 	if err := e.acp.RespondPermission(msg.RequestID, msg.Outcome, msg.OptionID); err != nil {
 		cn.sendError(msg.SessionID, "unknown_request", err.Error())
+		return
+	}
+	// Startup permissions have no prompt completion to clear needs_input.
+	// Active turns resume running; otherwise the established session is idle.
+	if !e.acp.HasPendingPermissions() && e.currentStatus() == protocol.StatusNeedsInput {
+		event := protocol.EventIdle
+		if e.promptActive {
+			event = protocol.EventRunning
+		}
+		cn.srv.queueStructuredEvent(e, msg.SessionID, event, nil)
 	}
 }
 

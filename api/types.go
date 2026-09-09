@@ -1,7 +1,10 @@
 // Package api defines the versioned Continuum local-alpha contract.
 package api
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"github.com/NakliTechie/continuum/internal/jsonwire"
+)
 
 type Request struct {
 	Cursor    string   `json:"cursor,omitempty"`
@@ -34,7 +37,7 @@ type Response struct {
 }
 
 func Result(id string, v any) Response {
-	b, _ := json.Marshal(v)
+	b, _ := jsonwire.Marshal(v)
 	return Response{Version: 1, RequestID: id, Class: "ok", Code: "ok", Durability: "committed", Next: Action{"none", ""}, Result: b}
 }
 func Error(id, class, code, message, next string) Response {

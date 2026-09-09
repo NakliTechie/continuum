@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/NakliTechie/continuum/internal/jsonwire"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -90,7 +91,7 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open state (another daemon may own it): %w", err)
 	}
-	s := &Store{db: db, MaxEvents: 4096, MaxBytes: 8 << 20}
+	s := &Store{db: db, MaxEvents: 4096, MaxBytes: 16 << 20}
 	err = db.Update(func(tx *bolt.Tx) error {
 		meta, err := tx.CreateBucketIfNotExists([]byte("meta"))
 		if err != nil {
@@ -174,12 +175,29 @@ func (s *Store) Blocks() ([]Block, error) {
 	})
 	return out, err
 }
+
+// MaxStructuredPayload accommodates an accepted ACP line plus its routing envelope.
+const MaxStructuredPayload = (8 << 20) + (64 << 10)
+
 func (s *Store) Append(id, kind string, payload any) error {
-	raw, err := json.Marshal(payload)
+	return s.appendBounded(id, kind, payload, 256<<10)
+}
+
+// AppendStructured retains a complete accepted frame. Ordinary event payloads
+// keep their smaller admission limit; only the two ACP routes use this bound.
+func (s *Store) AppendStructured(id, kind string, payload any) error {
+	if kind != "session_update" && kind != "permission_request" {
+		return fmt.Errorf("not a structured frame kind: %s", kind)
+	}
+	return s.appendBounded(id, kind, payload, MaxStructuredPayload)
+}
+
+func (s *Store) appendBounded(id, kind string, payload any, limit int) error {
+	raw, err := jsonwire.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	if len(raw) > 256<<10 {
+	if len(raw) > limit {
 		return ErrLimit
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -189,7 +207,7 @@ func (s *Store) Append(id, kind string, payload any) error {
 			return err
 		}
 		e := Event{1, s.Host, id, seq, time.Now().UTC().Format(time.RFC3339Nano), kind, raw}
-		data, err := json.Marshal(e)
+		data, err := jsonwire.Marshal(e)
 		if err != nil {
 			return err
 		}
@@ -266,7 +284,9 @@ func (s *Store) Read(after uint64, block string) (Page, error) {
 		size := 0
 		scanned := 0
 		for k, v := c.Seek(key(after + 1)); k != nil; k, v = c.Next() {
-			if scanned >= 256 || size+len(v) > 512<<10 {
+			// A page normally stays below 512 KiB. One accepted larger frame
+			// is returned whole, alone, so its cursor can always advance.
+			if scanned >= 256 || (len(p.Events) > 0 && size+len(v) > 512<<10) {
 				break
 			}
 			scanned++

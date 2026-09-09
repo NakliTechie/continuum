@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/pty"
 	"github.com/NakliTechie/continuum/internal/terminal"
 	"io"
@@ -53,6 +54,27 @@ func (s *Server) record(id, kind string, payload any) {
 		}
 	}
 }
+func (s *Server) recordStructured(id, kind string, payload any) {
+	if m := s.modern; m != nil {
+		raw, err := jsonwire.Marshal(payload)
+		if err == nil {
+			err = m.Store.AppendStructured(id, kind, json.RawMessage(raw))
+		}
+		if err != nil {
+			m.degraded.Store(true)
+		}
+	}
+}
+
+func (s *Server) recordCaptureLoss(id string, cause error) {
+	if m := s.modern; m != nil {
+		if err := m.Store.MarkIncomplete(id); err != nil {
+			m.degraded.Store(true)
+		}
+		s.record(id, "capture_error", map[string]string{"message": cause.Error()})
+	}
+}
+
 func (m *Modern) recordBlock(id string, e *sessionEntry) {
 	if err := m.Store.AddBlock(journal.Block{ID: id, Agent: e.agent, PID: e.pid, State: "active", Started: e.startedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
 		m.degraded.Store(true)
@@ -62,7 +84,7 @@ func (m *Modern) recordBlock(id string, e *sessionEntry) {
 func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	reply := func(v api.Response) { _ = json.NewEncoder(w).Encode(v) }
+	reply := func(v api.Response) { enc := json.NewEncoder(w); enc.SetEscapeHTML(false); _ = enc.Encode(v) }
 	if r.Method != "POST" {
 		w.WriteHeader(405)
 		reply(api.Error("", "invalid_request", "method", "use POST /v1", "help"))

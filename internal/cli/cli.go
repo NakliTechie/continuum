@@ -28,7 +28,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-const Version = "0.1.0-alpha.1"
+// Version may be stamped with the source revision by local artifact builds.
+var Version = "0.1.0-alpha.2-dev"
+
 const help = `Continuum — work that outlives its clients
 
 First use (two terminals):
@@ -399,6 +401,8 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	limit := int64(1 << 20)
 	if q.Operation == "screen" {
 		limit = 32 << 20
+	} else if q.Operation == "events" {
+		limit = 16 << 20
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(&v); err != nil || v.Version != 1 || v.Class == "" {
 		return api.Error(q.RequestID, "indeterminate", "invalid_response", "response contract is unavailable", "status")

@@ -106,6 +106,8 @@ const (
 
 // Session events.
 const (
+	EventRunning      = "running"
+	EventUnknown      = "unknown"
 	EventExited       = "exited"
 	EventIdle         = "idle"
 	EventNeedsInput   = "needs_input"
@@ -352,6 +354,9 @@ type Error struct {
 	SessionID string `json:"session_id,omitempty"`
 	Code      string `json:"code"`
 	Message   string `json:"message"`
+	WaitID    string `json:"wait_id,omitempty"`
+	TurnID    uint64 `json:"turn_id,omitempty"`
+	RPCCode   *int   `json:"rpc_code,omitempty"`
 }
 
 // NewError builds an Error message.

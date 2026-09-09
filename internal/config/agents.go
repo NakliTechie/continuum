@@ -157,7 +157,7 @@ func (c *Config) ResolveAgents(lookPath func(string) (string, error)) (detected,
 			if len(a.Transports) == 0 {
 				a.Transports = known.Transports
 			}
-			if len(a.ACPArgs) == 0 {
+			if a.ACPArgs == nil {
 				a.ACPArgs = known.ACPArgs
 			}
 			if len(a.ResumeArgs) == 0 {

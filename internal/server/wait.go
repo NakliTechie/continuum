@@ -38,7 +38,8 @@ type waiter struct {
 	sid    string
 	timer  *time.Timer
 	once   sync.Once
-	closed bool // resolved already; guarded by the entry's statusMu
+	turn   uint64 // zero for an ordinary wait; otherwise its prompt generation
+	closed bool   // resolved already; guarded by the entry's statusMu
 }
 
 // resolve delivers exactly once. The WS write happens off the caller's
@@ -103,7 +104,7 @@ func (e *sessionEntry) resolveWaiters(status string) {
 	kept := e.waiters[:0]
 	var fire []*waiter
 	for _, w := range e.waiters {
-		if exiting || w.until[status] {
+		if exiting || ((w.turn == 0 || w.turn == e.turn) && w.until[status]) {
 			w.closed = true
 			fire = append(fire, w)
 			continue
@@ -167,26 +168,7 @@ func (e *sessionEntry) expireWait(w *waiter) {
 // exists it routes through here, where its blocked-detection is heuristic and
 // must be documented as best-effort rather than a guarantee.
 func blockedGuard(e *sessionEntry) bool {
-	return e.currentStatus() == protocol.StatusNeedsInput
-}
-
-// armPromptWait arms the §8.2 wait BEFORE the prompt is dispatched. Arming it
-// afterwards races the very transition the caller is waiting for — the gap this
-// frame exists to close.
-func (cn *conn) armPromptWait(e *sessionEntry, sessionID string, spec *protocol.WaitSpec) string {
-	if spec == nil {
-		return ""
-	}
-	until, bad := parseUntil(spec.Until)
-	if bad != "" {
-		return bad
-	}
-	w := &waiter{id: spec.WaitID, until: until, cn: cn, sid: sessionID}
-	w.timer = time.AfterFunc(waitTimeout(spec.TimeoutMS), func() { e.expireWait(w) })
-	if state, satisfied := e.armWait(w); satisfied {
-		w.resolve(state, false)
-	}
-	return ""
+	return e.currentStatus() == protocol.StatusNeedsInput || (e.acp != nil && e.acp.HasPendingPermissions())
 }
 
 func parseUntil(states []string) (map[string]bool, string) {

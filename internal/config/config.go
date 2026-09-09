@@ -33,7 +33,7 @@ type Agent struct {
 	// invoked with ACPArgs; nothing is special-cased by agent name anywhere.
 	Transports []string `toml:"transports"`
 	// ACPArgs are appended to Command when spawning transport "acp".
-	// Empty ⇒ ["acp"].
+	// Omitted (nil) ⇒ ["acp"]. An explicit empty array means no suffix.
 	ACPArgs []string `toml:"acp_args"`
 	// ResumeArgs is the argv that reopens one of this agent's own past
 	// conversations, with "{id}" standing in for the session reference the agent
@@ -77,7 +77,7 @@ func (a Agent) SupportsACP() bool {
 
 // ACPArgsOrDefault returns the argv suffix for an ACP spawn.
 func (a Agent) ACPArgsOrDefault() []string {
-	if len(a.ACPArgs) == 0 {
+	if a.ACPArgs == nil {
 		return []string{"acp"}
 	}
 	return a.ACPArgs

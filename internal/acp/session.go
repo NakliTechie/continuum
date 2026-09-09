@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/pty"
 )
 
@@ -72,6 +73,7 @@ type permOption struct {
 type pendingPerm struct {
 	rpcID   json.RawMessage
 	options []permOption
+	bytes   int
 }
 
 // Session is one running ACP agent child.
@@ -100,12 +102,13 @@ type Session struct {
 	writeMu sync.Mutex
 	capMu   sync.Mutex // serializes event-log (s.cap) writes across reader + writer goroutines
 
-	mu      sync.Mutex
-	nextID  int64
-	nextReq int64
-	pending map[string]chan *Envelope // normalized raw id -> waiter
-	perms   map[string]*pendingPerm   // menagerie request_id -> pending permission
-	closed  bool
+	mu              sync.Mutex
+	nextID          int64
+	nextReq         int64
+	pending         map[string]chan *Envelope // normalized raw id -> waiter
+	perms           map[string]*pendingPerm   // menagerie request_id -> pending permission
+	closed          bool
+	permissionBytes int
 
 	// Callbacks fire on the reader goroutine; keep them fast or hand off.
 	// Set OnUpdate through SetOnUpdate, never directly: a resumed session's
@@ -114,7 +117,10 @@ type Session struct {
 	updateMu            sync.Mutex
 	onUpdate            func(params json.RawMessage)
 	pendingUpdates      [][]byte
-	OnPermissionRequest func(requestID string, params json.RawMessage)
+	onPermissionRequest func(requestID string, params json.RawMessage)
+	pendingEvents       []startupEvent
+	pendingBytes        int
+	eventErr            error
 }
 
 // ErrLoadUnsupported means the agent does not advertise the loadSession
@@ -311,15 +317,28 @@ func (s *Session) readLoop(r io.ReadCloser) {
 		if err := json.Unmarshal(line, &env); err != nil {
 			continue
 		}
-		s.dispatch(&env)
+		s.dispatchFrame(&env, line)
+		if err := s.EventError(); err != nil {
+			s.readErr = err
+			s.Kill()
+			return
+		}
 	}
 	s.readErr = scanner.Err()
+	if s.readErr != nil {
+		s.Kill()
+	}
 }
 
 // ReadError is valid after Run returns or from its exit callback.
 func (s *Session) ReadError() error { return s.readErr }
 
 func (s *Session) dispatch(env *Envelope) {
+	raw, _ := jsonwire.Marshal(env)
+	s.dispatchFrame(env, raw)
+}
+
+func (s *Session) dispatchFrame(env *Envelope, raw []byte) {
 	switch {
 	case env.isResponse():
 		key := idKey(env.ID)
@@ -331,44 +350,36 @@ func (s *Session) dispatch(env *Envelope) {
 			ch <- env
 		}
 	case env.hasID() && strings.HasPrefix(env.Method, "session/request_permission"):
-		s.handlePermissionRequest(env)
+		s.handlePermissionRequest(env, raw)
 	case env.hasID():
 		// An agent->client request we do not implement (fs reads, terminal…).
 		_ = s.write(Envelope{JSONRPC: "2.0", ID: env.ID, Error: &RPCError{Code: -32601, Message: "not supported by relay"}})
 	case env.Method == "session/update":
-		// Full envelope, verbatim — the browser sees exactly what crossed stdio.
-		b, _ := json.Marshal(env)
-		s.updateMu.Lock()
-		cb := s.onUpdate
-		if cb == nil {
-			// Nobody is listening yet (session/load replay). Hold it.
-			s.pendingUpdates = append(s.pendingUpdates, b)
-		}
-		if cb != nil {
-			cb(b)
-		}
-		s.updateMu.Unlock()
+		s.deliverOrHold(startupEvent{payload: raw})
 	default:
 		// Unknown notification: already captured in the event log; ignore.
 	}
 }
 
-func (s *Session) handlePermissionRequest(env *Envelope) {
+func (s *Session) handlePermissionRequest(env *Envelope, raw []byte) {
 	var pr struct {
 		Options []permOption `json:"options"`
 	}
 	_ = json.Unmarshal(env.Params, &pr)
 
 	s.mu.Lock()
+	if len(s.perms) >= maxPendingPermissions || s.permissionBytes+len(raw) > maxPendingPermissionBytes {
+		s.mu.Unlock()
+		s.failEvents(fmt.Errorf("ACP pending permission budget exceeded (%d requests / %d bytes)", maxPendingPermissions, maxPendingPermissionBytes))
+		return
+	}
 	s.nextReq++
 	reqID := fmt.Sprintf("pr-%d", s.nextReq)
-	s.perms[reqID] = &pendingPerm{rpcID: append(json.RawMessage(nil), env.ID...), options: pr.Options}
+	s.perms[reqID] = &pendingPerm{rpcID: append(json.RawMessage(nil), env.ID...), options: pr.Options, bytes: len(raw)}
+	s.permissionBytes += len(raw)
 	s.mu.Unlock()
 
-	if s.OnPermissionRequest != nil {
-		b, _ := json.Marshal(env)
-		s.OnPermissionRequest(reqID, b)
-	}
+	s.deliverOrHold(startupEvent{requestID: reqID, payload: raw})
 }
 
 // RespondPermission answers a pending permission request. explicitOptionID
@@ -397,6 +408,7 @@ func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string)
 		return fmt.Errorf("no offered option for outcome %q", outcome)
 	}
 	delete(s.perms, requestID)
+	s.permissionBytes -= p.bytes
 	rpcID := append(json.RawMessage(nil), p.rpcID...)
 	s.mu.Unlock()
 
@@ -455,23 +467,6 @@ func (s *Session) Cancel() error {
 		Method:  "session/cancel",
 		Params:  mustJSON(map[string]string{"sessionId": s.ACPSessionID}),
 	})
-}
-
-// SetOnUpdate attaches the session/update sink and immediately delivers
-// anything that arrived before it was attached — the replayed transcript of a
-// resumed conversation, in order, before any live frame.
-func (s *Session) SetOnUpdate(f func(params json.RawMessage)) {
-	s.updateMu.Lock()
-	s.onUpdate = f
-	held := s.pendingUpdates
-	s.pendingUpdates = nil
-	defer s.updateMu.Unlock()
-	if f == nil {
-		return
-	}
-	for _, b := range held {
-		f(b)
-	}
 }
 
 // Kill hard-stops the child process (the `signal kill` path).
@@ -533,6 +528,9 @@ func (s *Session) requestContext(ctx context.Context, method string, params any,
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-s.readDone:
+		if s.readErr != nil {
+			return nil, fmt.Errorf("agent stdout: %w", s.readErr)
+		}
 		return nil, errors.New("agent stdout closed during request")
 	case resp := <-ch:
 		if resp == nil {
