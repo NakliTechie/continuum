@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,10 +33,11 @@ type Session struct {
 	StartedAt time.Time
 	PID       int
 
-	writeMu   sync.Mutex      // makes application input and generated replies indivisible writes
-	termMu    sync.Mutex      // serializes output parsing, PTY resize and snapshots
-	term      terminal.Engine // immutable after start; nil preserves legacy behavior
-	termFault string
+	writeMu       sync.Mutex      // makes application input and generated replies indivisible writes
+	termMu        sync.Mutex      // serializes output parsing, PTY resize and snapshots
+	term          terminal.Engine // immutable after start; nil preserves legacy behavior
+	termFault     string
+	killRequested atomic.Bool
 
 	ptmx *os.File
 	cmd  *exec.Cmd
@@ -152,6 +154,15 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 			code = ee.ExitCode()
 		} else {
 			code = -1
+		}
+	}
+	// Wait reaps the leader, but SIGKILL delivery and orphan reaping for its
+	// process group can lag it. Bound that drain before announcing explicit
+	// group shutdown; normal child exit incurs no extra wait.
+	if s.killRequested.Load() {
+		deadline := time.Now().Add(250 * time.Millisecond)
+		for syscall.Kill(-s.PID, 0) == nil && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
 		}
 	}
 	s.closeFiles()
@@ -289,8 +300,9 @@ func (s *Session) resizePTY(cols, rows int) error {
 	return ioErr
 }
 
-// Kill sends SIGKILL to the agent process.
+// Kill sends SIGKILL to the managed process group.
 func (s *Session) Kill() {
+	s.killRequested.Store(true)
 	if s.cmd.Process != nil {
 		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 	}
