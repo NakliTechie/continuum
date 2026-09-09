@@ -126,7 +126,7 @@
                   },
                   "cache_key": {
                     "type": "string",
-                    "description": "Skip this command when the named file's hash is unchanged since the last successful materialise in this repo."
+                    "description": "Skip the same expanded command in the same workspace when the named file's hash is unchanged since that command last succeeded there."
                   }
                 }
               }

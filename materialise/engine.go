@@ -119,7 +119,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		res.Steps = append(res.Steps, step)
 	}
 
-	// --- 3. commands (cache_key skipping is per repo, not per workspace) ---
+	// --- 3. commands (cache_key skipping is per workspace and expanded command) ---
 	for i, c := range m.Commands {
 		step, err := e.runCommand(c, rec, repoRoot)
 		if err != nil {
@@ -299,6 +299,15 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 	}
 	line := interpolate(sv.Run, rec.Vars)
 	step := Step{Stage: "services", Action: "start", Detail: sv.Name}
+	if e.DryRun {
+		step.Skipped, step.Reason = true, "dry run"
+		return step, nil
+	}
+	unlock, err := e.lockCacheScope("service:"+scope, 11*time.Minute)
+	if err != nil {
+		return step, err
+	}
+	defer unlock()
 	up, err := e.serviceUp(scope)
 	if err == nil && up {
 		// The cache remembers that we started it; it cannot know it is still
@@ -310,7 +319,9 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 			step.Skipped, step.Reason = true, "already running"
 			return step, nil
 		}
-		if _, alive := e.superviseService(sv, rec, 0); alive {
+		// A concurrent starter may have returned before its port binds.
+		// Give the declared settle window before admitting a restart.
+		if _, alive := e.superviseService(sv, rec, e.settle()); alive {
 			step.Skipped, step.Reason = true, "already running"
 			return step, nil
 		}
@@ -323,7 +334,9 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 	if out, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), line, 10*time.Minute); err != nil {
 		return step, fmt.Errorf("%s: %w: %s", sv.Name, err, strings.TrimSpace(string(out)))
 	}
-	_ = e.serviceMark(scope)
+	if err := e.serviceMark(scope); err != nil {
+		return step, fmt.Errorf("service started but recording its cache failed; inspect before retry: %w", err)
+	}
 	return step, nil
 }
 
@@ -399,7 +412,22 @@ func (e *Engine) saveCache(cs *cacheSet) error {
 	if err := os.MkdirAll(e.Prov.Home, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(e.cachePath(), append(b, '\n'), 0o600)
+	f, err := os.CreateTemp(e.Prov.Home, ".materialise-cache-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if _, err = f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), e.cachePath())
 }
 
 func (e *Engine) cacheHit(repoRoot, run, hash string) (bool, error) {
@@ -407,6 +435,11 @@ func (e *Engine) cacheHit(repoRoot, run, hash string) (bool, error) {
 }
 
 func (e *Engine) cachePut(repoRoot, run, hash string) error {
+	unlock, err := e.lockCacheScope("cache-write", 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cs := e.loadCache()
 	cs.Commands[repoRoot+"|"+run] = hash
 	return e.saveCache(cs)
@@ -415,6 +448,11 @@ func (e *Engine) cachePut(repoRoot, run, hash string) error {
 func (e *Engine) serviceUp(scope string) (bool, error) { return e.loadCache().Services[scope], nil }
 
 func (e *Engine) serviceMark(scope string) error {
+	unlock, err := e.lockCacheScope("cache-write", 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cs := e.loadCache()
 	cs.Services[scope] = true
 	return e.saveCache(cs)

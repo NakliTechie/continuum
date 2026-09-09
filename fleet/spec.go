@@ -82,9 +82,9 @@ type File struct {
 	Vars     []string `json:"vars,omitempty"`
 }
 
-// Command is a setup step. CacheKey names a file whose hash decides whether the
-// step can be skipped — what turns a 3-minute `npm ci` into a no-op on
-// workspaces 2 through N.
+// Command is a setup step. CacheKey names a file whose unchanged hash skips
+// the same expanded command in the same workspace. A different workspace must
+// create its own artifacts even when that file has the same hash.
 type Command struct {
 	Run      string `json:"run"`
 	CacheKey string `json:"cache_key,omitempty"`
