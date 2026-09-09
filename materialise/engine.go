@@ -40,6 +40,9 @@ type Engine struct {
 	Prob Prober
 	// Dial reports whether something is listening; supervision uses it.
 	Dial Dialer
+	// Settle is how long a freshly started service gets to bind its port before
+	// supervision calls it dead. Zero means the package default.
+	Settle time.Duration
 	// DryRun records what would happen without starting services or running the
 	// escape hatch. Commands and probes are recorded, never executed.
 	DryRun bool
@@ -70,10 +73,11 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	} else if rec, err = e.Prov.Provision(spec, repoRoot, name); err != nil {
 		return nil, err
 	}
-	// The state this workspace was in BEFORE this pass. on_start is a lifecycle
-	// transition, so it fires when a workspace becomes ready — not on every
-	// convergence pass over one that already is.
-	priorState := rec.State
+	// Whether on_start has ever run for this workspace. Gating on the record's
+	// prior STATE was wrong: Supervise() can promote a workspace to ready without
+	// running the hook, after which every later pass read "already started" and
+	// skipped it forever. The stamp is the honest question — did the hook run?
+	alreadyStarted := rec.StartedAt != ""
 	res.Workspace = rec
 	for _, p := range spec.Workspace.Materialise.Ports {
 		res.Steps = append(res.Steps, Step{Stage: "ports", Action: "allocate",
@@ -138,7 +142,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		if !sv.Supervise {
 			continue
 		}
-		step, ok := e.superviseService(sv, rec)
+		step, ok := e.superviseService(sv, rec, e.settle())
 		res.Steps = append(res.Steps, step)
 		if !ok {
 			// Same wording as Supervise writes, so a later supervision pass can
@@ -155,10 +159,10 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		switch {
 		case e.DryRun:
 			step.Skipped, step.Reason = true, "dry run"
-		case priorState == workspace.StateReady:
-			// Already started; this pass only converged. Firing again would make a
-			// hook that sends a notification, seeds data or registers the workspace
-			// do it once per materialise call.
+		case alreadyStarted:
+			// The hook already ran for this workspace; this pass only converged.
+			// Firing again would make a hook that notifies, seeds or registers do it
+			// once per materialise call.
 			step.Skipped, step.Reason = true, "workspace was already started"
 		default:
 			if _, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), interpolate(h.OnStart, rec.Vars), 5*time.Minute); err != nil {
@@ -168,6 +172,9 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 				// way a failed probe is.
 				step.Reason = err.Error()
 				res.Failed = append(res.Failed, "hooks.on_start: "+err.Error())
+			} else if !e.DryRun {
+				// Stamped only on success, so a hook that failed is retried next pass.
+				_ = e.Prov.MarkStarted(name)
 			}
 		}
 		res.Steps = append(res.Steps, step)
@@ -271,7 +278,7 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 			step.Skipped, step.Reason = true, "already running"
 			return step, nil
 		}
-		if _, alive := e.superviseService(sv, rec); alive {
+		if _, alive := e.superviseService(sv, rec, 0); alive {
 			step.Skipped, step.Reason = true, "already running"
 			return step, nil
 		}
@@ -420,7 +427,13 @@ func RenderPlan(spec *fleet.Spec, res *Result) string {
 // superviseService checks that a supervised service is still answering on its
 // allocated port. The validator guarantees a supervised service has a port_var,
 // so there is always something concrete to check rather than an assumption.
-func (e *Engine) superviseService(sv fleet.Service, rec *workspace.Record) (Step, bool) {
+// settle is how long superviseService waits for a service to come up before
+// calling it dead. "Did it come up?" (right after the start command returned)
+// and "is it still up?" (a later check) are different questions: `docker compose
+// up -d` returns before postgres accepts TCP, and connection-refused comes back
+// instantly, so a single dial reported a perfectly healthy service as dead. This
+// mirrors the rule probe.go already documents for HTTP probes.
+func (e *Engine) superviseService(sv fleet.Service, rec *workspace.Record, settle time.Duration) (Step, bool) {
 	step := Step{Stage: "supervise", Action: "check", Detail: sv.Name}
 	if e.DryRun {
 		step.Skipped, step.Reason = true, "dry run"
@@ -431,11 +444,19 @@ func (e *Engine) superviseService(sv fleet.Service, rec *workspace.Record) (Step
 		step.Reason = "no allocated port for " + sv.PortVar
 		return step, false
 	}
-	if err := e.Dial(fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second); err != nil {
-		step.Reason = err.Error()
-		return step, false
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(settle)
+	var err error
+	for {
+		if err = e.Dial(addr, 2*time.Second); err == nil {
+			return step, true
+		}
+		if !time.Now().Before(deadline) {
+			step.Reason = err.Error()
+			return step, false
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	return step, true
 }
 
 // Supervise re-checks every supervised service in the spec and records the
@@ -462,7 +483,7 @@ func (e *Engine) Supervise(spec *fleet.Spec, name string) (string, error) {
 		if !sv.Supervise {
 			continue
 		}
-		if _, ok := e.superviseService(sv, rec); !ok {
+		if _, ok := e.superviseService(sv, rec, 0); !ok {
 			reason := supervisionReason + sv.Name
 			if err := e.Prov.SetStateReason(name, workspace.StateUnhealthy, reason); err != nil {
 				return "", err
@@ -480,6 +501,21 @@ func (e *Engine) Supervise(spec *fleet.Spec, name string) (string, error) {
 		return workspace.StateReady, nil
 	}
 	return rec.State, nil
+}
+
+// serviceSettle is the default grace a freshly started service gets to bind its
+// port. `docker compose up -d` returns before postgres accepts TCP.
+const serviceSettle = 30 * time.Second
+
+// settle is the configured grace, or the package default when unset.
+func (e *Engine) settle() time.Duration {
+	if e.Settle > 0 {
+		return e.Settle
+	}
+	if e.Settle < 0 {
+		return 0 // explicitly no grace, for tests that assert the dead path
+	}
+	return serviceSettle
 }
 
 // supervisionReason prefixes the reason supervision writes, so Supervise can

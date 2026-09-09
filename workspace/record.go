@@ -24,7 +24,12 @@ type Record struct {
 	// Reason says why the workspace is in State, when State is unhealthy. It is
 	// what lets supervision clear an unhealthy it caused without clearing one a
 	// failed health probe caused.
-	Reason    string `json:"reason,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// StartedAt is stamped the first time hooks.on_start ran successfully. The
+	// hook is gated on this rather than on the workspace's state, because
+	// supervision can promote a workspace to ready without ever starting it —
+	// gating on state meant a recovered workspace skipped on_start forever.
+	StartedAt string `json:"started_at,omitempty"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }

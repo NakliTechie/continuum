@@ -54,9 +54,13 @@ type Materialise struct {
 }
 
 // Hooks run at workspace lifecycle transitions. on_start runs after a successful
-// materialise; on_stop and on_destroy run during teardown, before the
-// corresponding operation, so a hook can still see the workspace it is about to
-// lose.
+// materialise.
+//
+// on_stop and on_destroy are DECLARED but not yet executed: the teardown
+// executor lands in C5, and until it does, nothing runs them. Validating and
+// documenting a field that silently does nothing is how an author's on_destroy
+// volume cleanup passes review and never runs, so it is said plainly here rather
+// than implied by the schema.
 type Hooks struct {
 	OnStart   string `json:"on_start,omitempty"`
 	OnStop    string `json:"on_stop,omitempty"`

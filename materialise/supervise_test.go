@@ -3,6 +3,9 @@ package materialise
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +30,7 @@ func supervisedSpec() *fleet.Spec {
 func TestASupervisedServiceThatDiesFlipsTheWorkspaceToUnhealthy(t *testing.T) {
 	repo, home := testRepo(t), t.TempDir()
 	e := New(workspace.New(home))
-	e.Exec = &RecordingExecutor{Fail: map[string]bool{}}
+	e.Exec, e.Settle = &RecordingExecutor{Fail: map[string]bool{}}, -1
 
 	// A real listener stands in for the running service, so supervision is
 	// dialling something that genuinely exists rather than a stub saying yes.
@@ -135,7 +138,7 @@ func TestReMaterialiseRestartsADeadSupervisedService(t *testing.T) {
 	repo, home := testRepo(t), t.TempDir()
 	e := New(workspace.New(home))
 	ex := &RecordingExecutor{Fail: map[string]bool{}}
-	e.Exec, e.Dial = ex, TCPDial
+	e.Exec, e.Dial, e.Settle = ex, TCPDial, -1
 	spec := supervisedSpec()
 	spec.Workspace.Materialise.Ports[0].Range = [2]int{5810, 5819}
 
@@ -235,7 +238,7 @@ func TestAFailingOnStartLeavesTheWorkspaceUnhealthyNotStranded(t *testing.T) {
 func TestSupervisionRestoresReadyWhenTheServiceComesBack(t *testing.T) {
 	repo, home := testRepo(t), t.TempDir()
 	e := New(workspace.New(home))
-	e.Exec, e.Dial = &RecordingExecutor{Fail: map[string]bool{}}, TCPDial
+	e.Exec, e.Dial, e.Settle = &RecordingExecutor{Fail: map[string]bool{}}, TCPDial, -1
 	spec := supervisedSpec()
 	spec.Workspace.Materialise.Ports[0].Range = [2]int{5820, 5829}
 
@@ -267,7 +270,7 @@ func TestSupervisionRestoresReadyWhenTheServiceComesBack(t *testing.T) {
 func TestSupervisionDoesNotClearAnUnhealthyItDidNotCause(t *testing.T) {
 	repo, home := testRepo(t), t.TempDir()
 	e := New(workspace.New(home))
-	e.Exec, e.Prob, e.Dial = &RecordingExecutor{Fail: map[string]bool{}}, FailProber{}, TCPDial
+	e.Exec, e.Prob, e.Dial, e.Settle = &RecordingExecutor{Fail: map[string]bool{}}, FailProber{}, TCPDial, -1
 	spec := supervisedSpec()
 	spec.Workspace.Materialise.Ports[0].Range = [2]int{5830, 5839}
 	spec.Workspace.Materialise.Health = []fleet.Probe{{Probe: "http", URL: "http://localhost/healthz", TimeoutS: 1}}
@@ -297,7 +300,7 @@ func TestSupervisionDoesNotClearAnUnhealthyItDidNotCause(t *testing.T) {
 func TestSuperviseRefusesAnInvalidSpec(t *testing.T) {
 	repo, home := testRepo(t), t.TempDir()
 	e := New(workspace.New(home))
-	e.Exec, e.Dial = &RecordingExecutor{Fail: map[string]bool{}}, TCPDial
+	e.Exec, e.Dial, e.Settle = &RecordingExecutor{Fail: map[string]bool{}}, TCPDial, -1
 	spec := supervisedSpec()
 	spec.Workspace.Materialise.Ports[0].Range = [2]int{5840, 5849}
 
@@ -324,4 +327,136 @@ func TestSuperviseRefusesAnInvalidSpec(t *testing.T) {
 	if rec.State != workspace.StateReady {
 		t.Errorf("state = %q after an invalid Supervise call, want it untouched at ready", rec.State)
 	}
+}
+
+// Regression for the blocker an independent verifier found on 2026-09-09, caused
+// by two fixes interacting: on_start was gated on the workspace's prior STATE,
+// and Supervise() promotes a workspace to ready without running the hook. A
+// workspace recovered by supervision therefore skipped on_start forever after.
+func TestOnStartStillRunsAfterSupervisionPromotedTheWorkspace(t *testing.T) {
+	repo, home := testRepo(t), t.TempDir()
+	e := New(workspace.New(home))
+	ex := &RecordingExecutor{Fail: map[string]bool{}}
+	e.Exec, e.Dial, e.Settle = ex, TCPDial, -1
+	spec := supervisedSpec()
+	spec.Workspace.Materialise.Ports[0].Range = [2]int{5950, 5959}
+	spec.Workspace.Materialise.Hooks = &fleet.Hooks{OnStart: "announce"}
+
+	// Nothing is listening yet, so the first pass is unhealthy and the hook must
+	// not have run.
+	first, err := e.Run(spec, repo, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.State != workspace.StateUnhealthy || ex.Count("announce") != 0 {
+		t.Fatalf("setup: state=%q announce=%d, want unhealthy and 0", first.State, ex.Count("announce"))
+	}
+
+	// The service comes up and supervision promotes the workspace to ready.
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first.Workspace.Ports["DB_PORT"]))
+	if err != nil {
+		t.Skipf("could not bind: %v", err)
+	}
+	defer ln.Close()
+	if state, err := e.Supervise(spec, "w1"); err != nil || state != workspace.StateReady {
+		t.Fatalf("Supervise: state=%q err=%v, want ready", state, err)
+	}
+	if ex.Count("announce") != 0 {
+		t.Fatalf("Supervise ran the start hook itself (%d times); it must not", ex.Count("announce"))
+	}
+
+	// The next materialise must still run on_start — this workspace has never
+	// been started, whatever its state says.
+	second, err := e.Run(spec, repo, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Count("announce") != 1 {
+		var hook Step
+		for _, s := range second.Steps {
+			if s.Stage == "hooks" {
+				hook = s
+			}
+		}
+		t.Fatalf("on_start ran %d times after a supervision promotion, want 1 (hook step: skipped=%v reason=%q)",
+			ex.Count("announce"), hook.Skipped, hook.Reason)
+	}
+
+	// And still exactly once thereafter.
+	if _, err := e.Run(spec, repo, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := ex.Count("announce"); n != 1 {
+		t.Errorf("on_start ran %d times in total, want 1", n)
+	}
+}
+
+// Regression: a service that has not finished binding when its start command
+// returns was reported dead. `docker compose up -d db` returns before postgres
+// accepts TCP, and connection-refused comes back instantly, so a single dial
+// condemned a perfectly healthy service. probe.go documents this rule for HTTP
+// probes; supervision now follows it too.
+func TestASlowBindingServiceIsNotReportedDead(t *testing.T) {
+	repo, home := testRepo(t), t.TempDir()
+	e := New(workspace.New(home))
+	e.Settle = 3 * time.Second
+
+	var mu sync.Mutex
+	var ln net.Listener
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if ln != nil {
+			_ = ln.Close()
+		}
+	})
+
+	spec := supervisedSpec()
+	spec.Workspace.Materialise.Ports[0].Range = [2]int{5960, 5969}
+
+	// The start command returns immediately and binds the port 600ms later,
+	// exactly like a container that is still coming up.
+	e.Dial = TCPDial
+	e.Exec = &slowBinder{home: home, prov: e.Prov, mu: &mu, ln: &ln}
+
+	res, err := e.Run(spec, repo, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != workspace.StateReady {
+		t.Fatalf("state = %q (failed: %v), want ready — the service bound 600ms after its start command returned",
+			res.State, res.Failed)
+	}
+}
+
+// slowBinder starts "the service" asynchronously, binding the workspace's
+// allocated port after a delay.
+type slowBinder struct {
+	home string
+	prov *workspace.Provisioner
+	mu   *sync.Mutex
+	ln   *net.Listener
+}
+
+func (s *slowBinder) Run(dir string, env []string, cmdline string, timeout time.Duration) ([]byte, error) {
+	if cmdline != "start-db" {
+		return nil, nil
+	}
+	var port int
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DB_PORT=") {
+			port, _ = strconv.Atoi(strings.TrimPrefix(kv, "DB_PORT="))
+		}
+	}
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		*s.ln = l
+		s.mu.Unlock()
+	}()
+	return nil, nil
 }

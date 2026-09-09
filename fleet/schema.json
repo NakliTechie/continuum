@@ -4,11 +4,26 @@
   "title": "menagerie.fleet.v1",
   "description": "A fleet spec: one file per repo, committed. The browser edits it; the relay executes it. Authoritative validation lives in relay-go/fleet (Go) and is mirrored in index.html; this document is the published contract.",
   "type": "object",
-  "required": ["spec", "name", "repo", "topology", "workspace", "roster"],
+  "required": [
+    "spec",
+    "name",
+    "repo",
+    "topology",
+    "workspace",
+    "roster"
+  ],
   "properties": {
-    "spec": { "const": "menagerie.fleet.v1" },
-    "name": { "type": "string", "minLength": 1 },
-    "repo": { "type": "string", "minLength": 1 },
+    "spec": {
+      "const": "menagerie.fleet.v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1
+    },
     "topology": {
       "type": "string",
       "minLength": 1,
@@ -16,10 +31,19 @@
     },
     "workspace": {
       "type": "object",
-      "required": ["isolation", "materialise"],
+      "required": [
+        "isolation",
+        "materialise"
+      ],
       "properties": {
-        "isolation": { "enum": ["worktree"] },
-        "branch_prefix": { "type": "string" },
+        "isolation": {
+          "enum": [
+            "worktree"
+          ]
+        },
+        "branch_prefix": {
+          "type": "string"
+        },
         "materialise": {
           "type": "object",
           "description": "Stages run in a fixed, non-configurable order: ports -> files -> commands -> services -> health -> escape.",
@@ -28,10 +52,24 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["name", "range"],
+                "required": [
+                  "name",
+                  "range"
+                ],
                 "properties": {
-                  "name": { "type": "string", "minLength": 1 },
-                  "range": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 1 } }
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "range": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
                 }
               }
             },
@@ -39,13 +77,38 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["to"],
-                "oneOf": [{ "required": ["from"] }, { "required": ["template"] }],
+                "required": [
+                  "to"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "from"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "template"
+                    ]
+                  }
+                ],
                 "properties": {
-                  "from": { "type": "string" },
-                  "template": { "type": "string" },
-                  "to": { "type": "string", "minLength": 1 },
-                  "vars": { "type": "array", "items": { "type": "string" } }
+                  "from": {
+                    "type": "string"
+                  },
+                  "template": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "vars": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             },
@@ -53,10 +116,18 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["run"],
+                "required": [
+                  "run"
+                ],
                 "properties": {
-                  "run": { "type": "string", "minLength": 1 },
-                  "cache_key": { "type": "string", "description": "Skip this command when the named file's hash is unchanged since the last successful materialise in this repo." }
+                  "run": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "cache_key": {
+                    "type": "string",
+                    "description": "Skip this command when the named file's hash is unchanged since the last successful materialise in this repo."
+                  }
                 }
               }
             },
@@ -64,12 +135,32 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["name", "run"],
+                "required": [
+                  "name",
+                  "run"
+                ],
                 "properties": {
-                  "name": { "type": "string", "minLength": 1 },
-                  "run": { "type": "string", "minLength": 1 },
-                  "port_var": { "type": "string", "description": "Present means once per workspace; absent means once per repo." },
-                  "supervise": { "type": "boolean", "description": "Keep checking the service after its probe passed; requires port_var, because supervision needs something concrete to check. A supervised service that dies flips the workspace to unhealthy." }
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "run": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "port_var": {
+                    "type": "string",
+                    "description": "Present means once per workspace; absent means once per repo."
+                  },
+                  "supervise": {
+                    "type": "boolean",
+                    "description": "Keep checking the service after its probe passed; requires port_var, because supervision needs something concrete to check. A supervised service that dies flips the workspace to unhealthy."
+                  }
+                },
+                "dependentRequired": {
+                  "supervise": [
+                    "port_var"
+                  ]
                 }
               }
             },
@@ -77,23 +168,46 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["probe"],
+                "required": [
+                  "probe"
+                ],
                 "properties": {
-                  "probe": { "enum": ["http", "command"] },
-                  "url": { "type": "string" },
-                  "run": { "type": "string" },
-                  "timeout_s": { "type": "integer", "minimum": 1 }
+                  "probe": {
+                    "enum": [
+                      "http",
+                      "command"
+                    ]
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "timeout_s": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
                 }
               }
             },
-            "escape": { "type": "string", "description": "Runs last, with all variables exported. The honest hatch, not the default path." },
+            "escape": {
+              "type": "string",
+              "description": "Runs last, with all variables exported. The honest hatch, not the default path."
+            },
             "hooks": {
               "type": "object",
-              "description": "A lifecycle layer beside the six stages, not a seventh stage. on_start runs after a successful materialise; on_stop and on_destroy run during teardown, before the corresponding operation.",
+              "description": "A lifecycle layer beside the six stages, not a seventh stage. on_start runs after a successful materialise. on_stop and on_destroy are declared for teardown but are NOT executed yet \u2014 the teardown executor lands in C5.",
               "properties": {
-                "on_start": { "type": "string" },
-                "on_stop": { "type": "string" },
-                "on_destroy": { "type": "string" }
+                "on_start": {
+                  "type": "string"
+                },
+                "on_stop": {
+                  "type": "string"
+                },
+                "on_destroy": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -101,8 +215,15 @@
         "teardown": {
           "type": "object",
           "properties": {
-            "commands": { "type": "array", "items": { "type": "string" } },
-            "keep_branch": { "type": "boolean" }
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "keep_branch": {
+              "type": "boolean"
+            }
           }
         }
       }
@@ -112,31 +233,75 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["role", "agent", "count"],
+        "required": [
+          "role",
+          "agent",
+          "count"
+        ],
         "properties": {
-          "role": { "type": "string", "minLength": 1 },
-          "agent": { "type": "string", "minLength": 1 },
-          "model": { "type": "string" },
-          "count": { "type": "integer", "minimum": 1 },
-          "context_budget_tokens": { "type": "integer", "minimum": 1 },
-          "max_depth": { "type": "integer", "minimum": 0 }
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agent": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_budget_tokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     },
     "budgets": {
       "type": "object",
       "properties": {
-        "per_agent_usd": { "type": "number", "minimum": 0 },
-        "per_run_usd": { "type": "number", "minimum": 0 },
-        "per_agent_wallclock_min": { "type": "integer", "minimum": 1 },
-        "on_exceed": { "enum": ["drain", "kill"], "default": "drain" }
+        "per_agent_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "per_run_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "per_agent_wallclock_min": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "on_exceed": {
+          "enum": [
+            "drain",
+            "kill"
+          ],
+          "default": "drain"
+        }
       }
     },
     "exits": {
       "type": "object",
       "properties": {
-        "no_progress_repeats": { "type": "integer", "minimum": 1 },
-        "converge_on": { "type": "array", "items": { "type": "string" } }
+        "no_progress_repeats": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "converge_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   }

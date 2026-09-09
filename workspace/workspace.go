@@ -85,8 +85,13 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			State: StateProvisioning, CreatedAt: now(), UpdatedAt: now(),
 		}
 		if existing != nil {
+			// Carry forward everything a re-provision must not forget. StartedAt in
+			// particular: dropping it would re-run hooks.on_start on every pass,
+			// which is exactly what gating on it is meant to prevent.
 			rec.CreatedAt = existing.CreatedAt
 			rec.State = existing.State
+			rec.Reason = existing.Reason
+			rec.StartedAt = existing.StartedAt
 		}
 		rs.Workspaces[name] = rec
 		return saveRecords(p.Home, rs)
@@ -158,6 +163,26 @@ func (p *Provisioner) Load(name string) (*Record, error) {
 // workspace `unhealthy`, never `ready`.
 func (p *Provisioner) SetState(name, state string) error {
 	return p.SetStateReason(name, state, "")
+}
+
+// MarkStarted stamps the moment hooks.on_start first ran successfully, so it is
+// never run twice for one workspace and never skipped for one that has not
+// actually started.
+func (p *Provisioner) MarkStarted(name string) error {
+	return withPortLock(p.Home, func() error {
+		rs, err := loadRecords(p.Home)
+		if err != nil {
+			return err
+		}
+		w, ok := rs.Workspaces[name]
+		if !ok {
+			return fmt.Errorf("no such workspace %q", name)
+		}
+		if w.StartedAt == "" {
+			w.StartedAt, w.UpdatedAt = now(), now()
+		}
+		return saveRecords(p.Home, rs)
+	})
 }
 
 // SetStateReason records a state together with why. The reason is what lets a

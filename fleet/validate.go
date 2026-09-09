@@ -119,13 +119,13 @@ func Validate(s *Spec) []Issue {
 		if strings.TrimSpace(sv.Run) == "" {
 			add(base+"/run", "required", "service entry needs a run string")
 		}
-		if sv.PortVar != "" && !declared[sv.PortVar] {
+		if strings.TrimSpace(sv.PortVar) != "" && !declared[sv.PortVar] {
 			add(base+"/port_var", "undeclared_var", "port_var "+sv.PortVar+" is not a declared port")
 		}
 		// Supervision must have something to check. A supervised service with no
 		// port would degrade to "assume it is fine", which is the failure this
 		// field exists to prevent.
-		if sv.Supervise && sv.PortVar == "" {
+		if sv.Supervise && strings.TrimSpace(sv.PortVar) == "" {
 			add(base+"/supervise", "requires_port_var", "supervise needs port_var: without a port there is nothing to check after the probe passes")
 		}
 		out = append(out, undeclaredVars(base+"/run", sv.Run, declared)...)
