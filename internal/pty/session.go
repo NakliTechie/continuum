@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NakliTechie/continuum/internal/terminal"
 	creackpty "github.com/creack/pty"
 )
 
@@ -31,6 +32,11 @@ type Session struct {
 	StartedAt time.Time
 	PID       int
 
+	writeMu   sync.Mutex      // makes application input and generated replies indivisible writes
+	termMu    sync.Mutex      // serializes output parsing, PTY resize and snapshots
+	term      terminal.Engine // immutable after start; nil preserves legacy behavior
+	termFault string
+
 	ptmx *os.File
 	cmd  *exec.Cmd
 	cap  *os.File // append-only capture: ~/.menagerie/sessions/<id>.pty
@@ -47,11 +53,39 @@ const maxTail = 256 * 1024
 // Start spawns cmd attached to a new PTY and opens the capture file
 // (best-effort — capture failure does not fail the spawn).
 func Start(id, agent string, cmd *exec.Cmd, capture ...*string) (*Session, error) {
-	ptmx, err := creackpty.Start(cmd)
+	return start(id, agent, cmd, nil, capture...)
+}
+
+// TerminalOptions enables the experimental server-owned screen only at spawn.
+// Existing legacy sessions cannot be converted from a truncated byte tail.
+type TerminalOptions struct{ Cols, Rows int }
+
+func StartTerminal(id, agent string, cmd *exec.Cmd, opts TerminalOptions, capture ...*string) (*Session, error) {
+	return start(id, agent, cmd, &opts, capture...)
+}
+func start(id, agent string, cmd *exec.Cmd, opts *TerminalOptions, capture ...*string) (*Session, error) {
+	var engine terminal.Engine
+	var err error
+	if opts != nil {
+		engine, err = terminal.New(opts.Cols, opts.Rows)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var ptmx *os.File
+	if opts == nil {
+		ptmx, err = creackpty.Start(cmd)
+	} else {
+		ptmx, err = creackpty.StartWithSize(cmd, &creackpty.Winsize{Cols: uint16(opts.Cols), Rows: uint16(opts.Rows)})
+	}
 	if err != nil {
+		if engine != nil {
+			engine.Close()
+		}
 		return nil, err
 	}
 	s := &Session{
+		term:      engine,
 		ID:        id,
 		Agent:     agent,
 		StartedAt: time.Now(),
@@ -93,6 +127,19 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 			if s.cap != nil {
 				_, _ = s.cap.Write(chunk)
 			}
+			if s.term != nil {
+				s.termMu.Lock()
+				if s.termFault == "" {
+					reply, err := s.term.Feed(chunk)
+					if err == nil && len(reply) > 0 {
+						err = s.Write(reply)
+					}
+					if err != nil {
+						s.termFault = err.Error()
+					}
+				}
+				s.termMu.Unlock()
+			}
 			onData(seq, chunk)
 		}
 		if err != nil {
@@ -122,6 +169,8 @@ func (s *Session) Buffer() []byte {
 
 // Write sends input bytes to the PTY.
 func (s *Session) Write(b []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	deadline := time.Now().Add(time.Second)
 	for len(b) > 0 {
 		n := 0
@@ -197,6 +246,32 @@ func (s *Session) read(b []byte) (int, error) {
 
 // Resize never changes descriptor blocking mode through os.File.Fd.
 func (s *Session) Resize(cols, rows int) error {
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
+	if s.term != nil {
+		if !terminal.ValidSize(cols, rows) {
+			return fmt.Errorf("%w: resize", terminal.ErrLimit)
+		}
+		if s.termFault != "" {
+			return fmt.Errorf("terminal fault: %s", s.termFault)
+		}
+	}
+	if err := s.resizePTY(cols, rows); err != nil {
+		return err
+	}
+	if s.term != nil {
+		reply, err := s.term.Resize(cols, rows)
+		if err == nil && len(reply) > 0 {
+			err = s.Write(reply)
+		}
+		if err != nil {
+			s.termFault = err.Error()
+		}
+		return err
+	}
+	return nil
+}
+func (s *Session) resizePTY(cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
@@ -229,14 +304,39 @@ func (s *Session) Interrupt() {
 }
 
 func (s *Session) closeFiles() {
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
 	s.closed = true
+	if s.term != nil {
+		_ = s.term.Close()
+	}
 	_ = s.ptmx.Close()
 	if s.cap != nil {
 		_ = s.cap.Close()
 	}
+}
+
+// HasTerminal is immutable after construction.
+func (s *Session) HasTerminal() bool { return s.term != nil }
+func (s *Session) TerminalSnapshot() (terminal.Snapshot, bool) {
+	if s.term == nil {
+		return terminal.Snapshot{}, false
+	}
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
+	frame := s.term.Snapshot()
+	if s.termFault != "" {
+		frame.Fault = s.termFault
+	}
+	return frame, true
+}
+func (s *Session) TerminalFault() string {
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
+	return s.termFault
 }

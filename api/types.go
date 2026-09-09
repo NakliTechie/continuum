@@ -5,6 +5,7 @@ import "encoding/json"
 
 type Request struct {
 	Cursor    string   `json:"cursor,omitempty"`
+	Terminal  string   `json:"terminal,omitempty"`
 	Operation string   `json:"operation"`
 	RequestID string   `json:"request_id,omitempty"`
 	Block     string   `json:"block_id,omitempty"`

@@ -274,9 +274,16 @@ func sanitizeID(name string) string {
 // runSession pumps a session's PTY output (+ generic activity heuristics) to its
 // subscriber and handles exit. Shared by fresh spawns and adopted attaches.
 func (s *Server) runSession(id string, sess *pty.Session) {
+	faultReported := false
 	go sess.Run(
 		func(seq int, b []byte) {
 			s.deliverOutput(id, seq, b)
+			if !faultReported {
+				if fault := sess.TerminalFault(); fault != "" {
+					s.record(id, "terminal_fault", map[string]any{"message": fault})
+					faultReported = true
+				}
+			}
 			// E9: a session that declares its own status is the only authority on
 			// it. Guessing from output alongside the declaration makes the status
 			// flicker between two sources, and neither can be debugged.
@@ -291,6 +298,9 @@ func (s *Server) runSession(id string, sess *pty.Session) {
 			s.checkStall(id, b)
 		},
 		func(code int) {
+			if s.modern != nil {
+				s.modern.retireScreen(id, sess, code)
+			}
 			c := code
 			s.deliverEvent(id, protocol.EventExited, &c)
 			s.removeSession(id)
@@ -567,6 +577,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 // send(), which serializes them (session output goroutines write concurrently
 // with the read loop, and a connection can subscribe to multiple sessions).
 type conn struct {
+	terminal   *pty.TerminalOptions // modern spawn only; never set from legacy JSON
 	srv        *Server
 	ws         *websocket.Conn
 	ctx        context.Context
@@ -794,7 +805,7 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 	// When tmux is in play the agent runs inside a detached tmux session (so it
 	// outlives a relay restart) and our PTY just attaches to it.
 	tmuxName := ""
-	if s.useTmux() {
+	if cn.terminal == nil && s.useTmux() {
 		tmuxName = tmux.SessionName(id)
 		if err := tmux.Create(tmuxName, cmd.Dir, cmd.Env, cmd.Args); err != nil {
 			cn.sendError("", protocol.ErrSpawnFailed, "tmux create: "+err.Error())
@@ -804,7 +815,15 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cmd = tmux.AttachCmd(tmuxName)
 	}
 
-	sess, err := pty.Start(id, msg.Agent, cmd, s.cfg.CaptureDir)
+	var sess *pty.Session
+	if cn.terminal == nil {
+		sess, err = pty.Start(id, msg.Agent, cmd, s.cfg.CaptureDir)
+	} else {
+		// The profile advertises a conventional 256-color terminal; engine identity
+		// and its experimental limitations remain discoverable through /v1.
+		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+		sess, err = pty.StartTerminal(id, msg.Agent, cmd, *cn.terminal, s.cfg.CaptureDir)
+	}
 	if err != nil {
 		if tmuxName != "" {
 			_ = tmux.Kill(tmuxName)
@@ -1297,6 +1316,11 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 	if e == nil {
 		// Session is gone (relay restarted, or it exited) — client falls back to FSA replay.
 		_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
+		return
+	}
+
+	if sess := cn.srv.entrySess(e); sess != nil && sess.HasTerminal() {
+		cn.sendError(msg.SessionID, "terminal_profile_required", "this block uses server-owned screen-v1; use a compatible Continuum client")
 		return
 	}
 

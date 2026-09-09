@@ -6,11 +6,14 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/NakliTechie/continuum/internal/pty"
+	"github.com/NakliTechie/continuum/internal/terminal"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,15 +30,18 @@ type lease struct {
 // Modern uses the legacy server's process registry. It owns durable observation
 // and modern leases, never another process manager.
 type Modern struct {
-	s        *Server
-	Store    *journal.Store
-	observer string
-	leases   map[string]lease
-	degraded atomic.Bool
+	s            *Server
+	Store        *journal.Store
+	observer     string
+	leases       map[string]lease
+	degraded     atomic.Bool
+	retiredMu    sync.Mutex
+	retired      map[string]screenResult
+	retiredOrder []string
 }
 
 func (s *Server) EnableModern(store *journal.Store, observer string) *Modern {
-	m := &Modern{s: s, Store: store, observer: observer, leases: map[string]lease{}}
+	m := &Modern{s: s, Store: store, observer: observer, leases: map[string]lease{}, retired: map[string]screenResult{}}
 	s.modern = m
 	return m
 }
@@ -91,7 +97,7 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error("", "invalid_request", "field_size", "identifier exceeds 128 bytes", "help"))
 		return
 	}
-	read := q.Operation == "status" || q.Operation == "events"
+	read := q.Operation == "status" || q.Operation == "events" || q.Operation == "screen"
 	if !read && !operator {
 		w.WriteHeader(403)
 		reply(api.Error(q.RequestID, "access_denied", "operator_required", "observer credentials cannot change sessions", "status"))
@@ -115,6 +121,8 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func (m *Modern) read(q api.Request) api.Response {
 	switch q.Operation {
+	case "screen":
+		return m.screen(q)
 	case "status":
 		blocks, err := m.Store.Blocks()
 		if err != nil {
@@ -145,7 +153,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			next = b.ID
 		}
 		blocks = page
-		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": false})
+		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": false})
 		return v
 	case "events":
 		p, err := m.Store.Read(q.After, q.Block)
@@ -182,6 +190,20 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		return bad("request_id", "mutations require a stable request_id")
 	}
 	if q.Operation == "open" {
+		if q.Terminal != "" && q.Terminal != "screen-v1" {
+			return bad("terminal_profile", "supported terminal profile: screen-v1")
+		}
+		if q.Terminal == "screen-v1" {
+			if q.Cols == 0 {
+				q.Cols = 80
+			}
+			if q.Rows == 0 {
+				q.Rows = 24
+			}
+			if !terminal.ValidSize(q.Cols, q.Rows) {
+				return bad("size", "screen-v1 allows 240 columns, 100 rows and 19200 cells")
+			}
+		}
 		if len(q.Args) == 0 || len(q.Args) > 256 || !filepath.IsAbs(q.Cwd) {
 			return bad("command", "open requires an argv array and an absolute cwd")
 		}
@@ -243,6 +265,9 @@ func (m *Modern) effect(q api.Request) api.Response {
 		if err != nil || len(blocks) >= 1024 {
 			return fail("resource_exhausted", "block_limit", "state supports at most 1024 blocks", "status")
 		}
+		if q.Terminal == "screen-v1" && m.activeScreens() >= 16 {
+			return fail("resource_exhausted", "terminal_limit", "at most 16 server-owned terminals may run concurrently", "status")
+		}
 		var response map[string]any
 		cn := &conn{srv: m.s, ctx: context.Background(), registered: true, sink: func(b []byte) error {
 			var v map[string]any
@@ -252,12 +277,15 @@ func (m *Modern) effect(q api.Request) api.Response {
 			}
 			return nil
 		}}
+		if q.Terminal == "screen-v1" {
+			cn.terminal = &pty.TerminalOptions{Cols: q.Cols, Rows: q.Rows}
+		}
 		cn.handleSpawnPTY(protocol.Spawn{Agent: "custom", Args: q.Args, Cwd: q.Cwd})
 		m.s.detach(cn)
 		if response == nil || response["type"] != "spawned" {
 			return fail("invalid_request", "spawn_failed", "could not launch executable in the selected directory", "help")
 		}
-		return api.Result(q.RequestID, map[string]any{"block_id": response["session_id"], "pid": response["pid"]})
+		return api.Result(q.RequestID, map[string]any{"block_id": response["session_id"], "pid": response["pid"], "terminal": q.Terminal})
 	}
 	e := m.s.entry(q.Block)
 	if e == nil {
@@ -289,6 +317,9 @@ func (m *Modern) effect(q api.Request) api.Response {
 	sess := m.s.entrySess(e)
 	if sess == nil {
 		return fail("unsupported", "not_pty", "operation requires a PTY block", "status")
+	}
+	if q.Operation == "resize" && sess.HasTerminal() && !terminal.ValidSize(q.Cols, q.Rows) {
+		return fail("invalid_request", "size", "screen-v1 allows 240 columns, 100 rows and 19200 cells", "help")
 	}
 	var err error
 	if q.Operation == "input" {
