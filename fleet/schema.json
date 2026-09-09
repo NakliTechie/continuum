@@ -68,7 +68,8 @@
                 "properties": {
                   "name": { "type": "string", "minLength": 1 },
                   "run": { "type": "string", "minLength": 1 },
-                  "port_var": { "type": "string", "description": "Present means once per workspace; absent means once per repo." }
+                  "port_var": { "type": "string", "description": "Present means once per workspace; absent means once per repo." },
+                  "supervise": { "type": "boolean", "description": "Keep checking the service after its probe passed; requires port_var, because supervision needs something concrete to check. A supervised service that dies flips the workspace to unhealthy." }
                 }
               }
             },
@@ -85,7 +86,16 @@
                 }
               }
             },
-            "escape": { "type": "string", "description": "Runs last, with all variables exported. The honest hatch, not the default path." }
+            "escape": { "type": "string", "description": "Runs last, with all variables exported. The honest hatch, not the default path." },
+            "hooks": {
+              "type": "object",
+              "description": "A lifecycle layer beside the six stages, not a seventh stage. on_start runs after a successful materialise; on_stop and on_destroy run during teardown, before the corresponding operation.",
+              "properties": {
+                "on_start": { "type": "string" },
+                "on_stop": { "type": "string" },
+                "on_destroy": { "type": "string" }
+              }
+            }
           }
         },
         "teardown": {

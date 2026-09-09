@@ -10,6 +10,7 @@ package materialise
 import (
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,19 @@ type FileSystem interface {
 // Executor runs one shell command line in a directory with an environment.
 type Executor interface {
 	Run(dir string, env []string, cmdline string, timeout time.Duration) ([]byte, error)
+}
+
+// Dialer answers whether something is listening. Supervision uses it, and a
+// test can substitute one rather than binding real ports.
+type Dialer func(addr string, timeout time.Duration) error
+
+// TCPDial is the real dialer.
+func TCPDial(addr string, timeout time.Duration) error {
+	c, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
+	}
+	return c.Close()
 }
 
 // Prober answers whether a health check passes.

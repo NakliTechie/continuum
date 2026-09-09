@@ -23,6 +23,8 @@ var invalidWantPath = map[string]string{
 	"file-neither-from-nor-template.json": "/workspace/materialise/files/0",
 	"command-missing-run.json":            "/workspace/materialise/commands/0/run",
 	"bad-on-exceed.json":                  "/budgets/on_exceed",
+	"supervise-without-port-var.json":     "/workspace/materialise/services/0/supervise",
+	"hook-undeclared-var.json":            "/workspace/materialise/hooks/on_start",
 }
 
 func read(t *testing.T, dir, name string) []byte {
@@ -51,8 +53,8 @@ func names(t *testing.T, dir string) []string {
 
 func TestValidFixturesPass(t *testing.T) {
 	fs := names(t, "valid")
-	if len(fs) != 6 {
-		t.Fatalf("valid fixtures = %d, want 6", len(fs))
+	if len(fs) != 7 {
+		t.Fatalf("valid fixtures = %d, want 7", len(fs))
 	}
 	for _, n := range fs {
 		if _, issues := ValidateBytes(read(t, "valid", n)); len(issues) > 0 {
@@ -63,8 +65,8 @@ func TestValidFixturesPass(t *testing.T) {
 
 func TestInvalidFixturesRejectedAtTheRightPath(t *testing.T) {
 	fs := names(t, "invalid")
-	if len(fs) != 12 {
-		t.Fatalf("invalid fixtures = %d, want 12", len(fs))
+	if len(fs) != 14 {
+		t.Fatalf("invalid fixtures = %d, want 14", len(fs))
 	}
 	for _, n := range fs {
 		want, ok := invalidWantPath[n]

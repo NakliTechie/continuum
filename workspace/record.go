@@ -14,15 +14,19 @@ const recordFile = "workspaces.json"
 
 // Record is one provisioned workspace.
 type Record struct {
-	Name      string            `json:"name"`
-	Repo      string            `json:"repo"`
-	Branch    string            `json:"branch"`
-	Path      string            `json:"path"`
-	Ports     map[string]int    `json:"ports"`
-	Vars      map[string]string `json:"vars"`
-	State     string            `json:"state"`
-	CreatedAt string            `json:"created_at"`
-	UpdatedAt string            `json:"updated_at"`
+	Name   string            `json:"name"`
+	Repo   string            `json:"repo"`
+	Branch string            `json:"branch"`
+	Path   string            `json:"path"`
+	Ports  map[string]int    `json:"ports"`
+	Vars   map[string]string `json:"vars"`
+	State  string            `json:"state"`
+	// Reason says why the workspace is in State, when State is unhealthy. It is
+	// what lets supervision clear an unhealthy it caused without clearing one a
+	// failed health probe caused.
+	Reason    string `json:"reason,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // States a workspace can be in. `unhealthy` is deliberately distinct from

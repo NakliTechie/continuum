@@ -157,6 +157,13 @@ func (p *Provisioner) Load(name string) (*Record, error) {
 // SetState records a workspace's lifecycle state. A failed health probe leaves a
 // workspace `unhealthy`, never `ready`.
 func (p *Provisioner) SetState(name, state string) error {
+	return p.SetStateReason(name, state, "")
+}
+
+// SetStateReason records a state together with why. The reason is what lets a
+// later signal tell an unhealthy it is entitled to clear (its own supervised
+// service came back) from one it is not (a health probe failed).
+func (p *Provisioner) SetStateReason(name, state, reason string) error {
 	return withPortLock(p.Home, func() error {
 		rs, err := loadRecords(p.Home)
 		if err != nil {
@@ -166,7 +173,7 @@ func (p *Provisioner) SetState(name, state string) error {
 		if !ok {
 			return fmt.Errorf("no such workspace %q", name)
 		}
-		w.State, w.UpdatedAt = state, now()
+		w.State, w.Reason, w.UpdatedAt = state, reason, now()
 		return saveRecords(p.Home, rs)
 	})
 }

@@ -47,6 +47,20 @@ type Materialise struct {
 	// Escape runs last, after everything declared, with all variables exported.
 	// It is the honest hatch, not the default path.
 	Escape string `json:"escape,omitempty"`
+	// Hooks are a lifecycle layer beside the six stages, not a seventh stage:
+	// the ports->files->commands->services->health->escape order is unchanged,
+	// and on_start runs once that whole sequence has succeeded.
+	Hooks *Hooks `json:"hooks,omitempty"`
+}
+
+// Hooks run at workspace lifecycle transitions. on_start runs after a successful
+// materialise; on_stop and on_destroy run during teardown, before the
+// corresponding operation, so a hook can still see the workspace it is about to
+// lose.
+type Hooks struct {
+	OnStart   string `json:"on_start,omitempty"`
+	OnStop    string `json:"on_stop,omitempty"`
+	OnDestroy string `json:"on_destroy,omitempty"`
 }
 
 // Port is a variable bound to a port the relay allocates from Range. Hardcoded
@@ -78,6 +92,11 @@ type Service struct {
 	Name    string `json:"name"`
 	Run     string `json:"run"`
 	PortVar string `json:"port_var,omitempty"`
+	// Supervise keeps checking the service after its health probe passed. A
+	// probe is a moment, not a guarantee: without this, a service that dies a
+	// second later leaves the workspace reading `ready` while it is broken.
+	// Supervision needs something concrete to check, so it requires PortVar.
+	Supervise bool `json:"supervise,omitempty"`
 }
 
 // Probe gates completion. A workspace whose probes fail is `unhealthy`, never `ready`.
