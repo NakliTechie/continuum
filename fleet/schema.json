@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://menagerie.naklitechie.com/schema/menagerie.fleet.v1.json",
+  "title": "menagerie.fleet.v1",
+  "description": "A fleet spec: one file per repo, committed. The browser edits it; the relay executes it. Authoritative validation lives in relay-go/fleet (Go) and is mirrored in index.html; this document is the published contract.",
+  "type": "object",
+  "required": ["spec", "name", "repo", "topology", "workspace", "roster"],
+  "properties": {
+    "spec": { "const": "menagerie.fleet.v1" },
+    "name": { "type": "string", "minLength": 1 },
+    "repo": { "type": "string", "minLength": 1 },
+    "topology": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Required, no default. The value is not enumerated: the requirement is that the author names the topology, and an enum would refuse valid future shapes."
+    },
+    "workspace": {
+      "type": "object",
+      "required": ["isolation", "materialise"],
+      "properties": {
+        "isolation": { "enum": ["worktree"] },
+        "branch_prefix": { "type": "string" },
+        "materialise": {
+          "type": "object",
+          "description": "Stages run in a fixed, non-configurable order: ports -> files -> commands -> services -> health -> escape.",
+          "properties": {
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "range"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "range": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 1 } }
+                }
+              }
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["to"],
+                "oneOf": [{ "required": ["from"] }, { "required": ["template"] }],
+                "properties": {
+                  "from": { "type": "string" },
+                  "template": { "type": "string" },
+                  "to": { "type": "string", "minLength": 1 },
+                  "vars": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["run"],
+                "properties": {
+                  "run": { "type": "string", "minLength": 1 },
+                  "cache_key": { "type": "string", "description": "Skip this command when the named file's hash is unchanged since the last successful materialise in this repo." }
+                }
+              }
+            },
+            "services": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "run"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "run": { "type": "string", "minLength": 1 },
+                  "port_var": { "type": "string", "description": "Present means once per workspace; absent means once per repo." }
+                }
+              }
+            },
+            "health": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["probe"],
+                "properties": {
+                  "probe": { "enum": ["http", "command"] },
+                  "url": { "type": "string" },
+                  "run": { "type": "string" },
+                  "timeout_s": { "type": "integer", "minimum": 1 }
+                }
+              }
+            },
+            "escape": { "type": "string", "description": "Runs last, with all variables exported. The honest hatch, not the default path." }
+          }
+        },
+        "teardown": {
+          "type": "object",
+          "properties": {
+            "commands": { "type": "array", "items": { "type": "string" } },
+            "keep_branch": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "roster": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["role", "agent", "count"],
+        "properties": {
+          "role": { "type": "string", "minLength": 1 },
+          "agent": { "type": "string", "minLength": 1 },
+          "model": { "type": "string" },
+          "count": { "type": "integer", "minimum": 1 },
+          "context_budget_tokens": { "type": "integer", "minimum": 1 },
+          "max_depth": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "per_agent_usd": { "type": "number", "minimum": 0 },
+        "per_run_usd": { "type": "number", "minimum": 0 },
+        "per_agent_wallclock_min": { "type": "integer", "minimum": 1 },
+        "on_exceed": { "enum": ["drain", "kill"], "default": "drain" }
+      }
+    },
+    "exits": {
+      "type": "object",
+      "properties": {
+        "no_progress_repeats": { "type": "integer", "minimum": 1 },
+        "converge_on": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "spec": "menagerie.fleet.v1",
+  "name": "tiny",
+  "repo": ".",
+  "topology": "flat",
+  "workspace": {
+    "isolation": "worktree",
+    "materialise": {
+      "commands": [
+        {
+          "run": "npm ci"
+        }
+      ]
+    }
+  },
+  "roster": [
+    {
+      "role": "worker",
+      "agent": "codex",
+      "count": 1
+    }
+  ]
+}
