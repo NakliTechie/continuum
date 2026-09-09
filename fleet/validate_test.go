@@ -1,8 +1,10 @@
 package fleet
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -55,8 +57,8 @@ func names(t *testing.T, dir string) []string {
 
 func TestValidFixturesPass(t *testing.T) {
 	fs := names(t, "valid")
-	if len(fs) != 10 {
-		t.Fatalf("valid fixtures = %d, want 10", len(fs))
+	if len(fs) != 7 {
+		t.Fatalf("valid fixtures = %d, want 7", len(fs))
 	}
 	for _, n := range fs {
 		if _, issues := ValidateBytes(read(t, "valid", n)); len(issues) > 0 {
@@ -241,4 +243,90 @@ func TestSecretLintSurvivesAnEnormousLine(t *testing.T) {
 	if issues[0].Code != "secret_in_spec" {
 		t.Errorf("issue = %v, want secret_in_spec", issues[0])
 	}
+}
+
+// testdata/normalises holds documents that are only valid AFTER the ingress
+// normalises them — a padded probe kind, a whitespace-only template beside a real
+// from. They are kept out of testdata/valid because valid/ means "satisfies the
+// published schema.json as written", and JSON Schema cannot trim.
+func TestNormalisingFixturesBecomeValid(t *testing.T) {
+	fs := names(t, "normalises")
+	if len(fs) != 3 {
+		t.Fatalf("normalising fixtures = %d, want 3", len(fs))
+	}
+	for _, n := range fs {
+		if _, issues := ValidateBytes(read(t, "normalises", n)); len(issues) > 0 {
+			t.Errorf("%s: want no issues once normalised, got %v", n, issues)
+		}
+	}
+}
+
+// The contract normalize.go states — "adding a field to the spec means adding it
+// here" — was backed by nothing. This walks the Spec by reflection, sets every
+// string field to a padded value, and asserts normalize trimmed it. A new field
+// that normalize forgets fails here instead of shipping a validator that is more
+// permissive than its consumer.
+func TestNormalizeCoversEveryStringField(t *testing.T) {
+	s := &Spec{
+		Workspace: Workspace{Materialise: Materialise{
+			Ports:    []Port{{}},
+			Files:    []File{{Vars: []string{" v "}}},
+			Commands: []Command{{}},
+			Services: []Service{{}},
+			Health:   []Probe{{}},
+			Hooks:    &Hooks{},
+		}, Teardown: &Teardown{Commands: []string{" t "}}},
+		Roster:  []Role{{}},
+		Budgets: &Budgets{},
+		Exits:   &Exits{ConvergeOn: []string{" c "}},
+	}
+	padEveryString(reflect.ValueOf(s).Elem())
+	s.normalize()
+	if missed := findUntrimmed(reflect.ValueOf(s).Elem(), ""); len(missed) > 0 {
+		t.Fatalf("normalize() left these string fields untrimmed: %v", missed)
+	}
+}
+
+func padEveryString(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString("  padded  ")
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			padEveryString(v.Field(i))
+		}
+	case reflect.Ptr, reflect.Interface:
+		if !v.IsNil() {
+			padEveryString(v.Elem())
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			padEveryString(v.Index(i))
+		}
+	}
+}
+
+func findUntrimmed(v reflect.Value, path string) []string {
+	var out []string
+	switch v.Kind() {
+	case reflect.String:
+		if s := v.String(); s != strings.TrimSpace(s) {
+			out = append(out, path)
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			out = append(out, findUntrimmed(v.Field(i), path+"."+v.Type().Field(i).Name)...)
+		}
+	case reflect.Ptr, reflect.Interface:
+		if !v.IsNil() {
+			out = append(out, findUntrimmed(v.Elem(), path)...)
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			out = append(out, findUntrimmed(v.Index(i), fmt.Sprintf("%s[%d]", path, i))...)
+		}
+	}
+	return out
 }

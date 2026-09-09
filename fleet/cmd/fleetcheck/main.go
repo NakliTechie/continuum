@@ -45,7 +45,7 @@ func main() {
 	}
 
 	out := map[string][]fleet.Issue{}
-	for _, dir := range []string{"valid", "invalid", "secrets"} {
+	for _, dir := range []string{"valid", "invalid", "secrets", "normalises"} {
 		entries, err := os.ReadDir(filepath.Join(target, dir))
 		if err != nil {
 			continue

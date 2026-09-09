@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/NakliTechie/menagerie/relay-go/fleet"
@@ -20,6 +21,25 @@ type Provisioner struct {
 	Home string
 	// Root is where worktrees are created, typically <Home>/workspaces.
 	Root string
+}
+
+// nameOK is deliberately narrow. The workspace name becomes a directory under the
+// relay's root AND a git branch name, so it is the one value in this pipeline that
+// reaches two different interpreters of syntax. Anything outside this set is
+// refused rather than escaped: "../../etc" as a name is a path traversal, and a
+// name starting with "-" is an argv flag to git.
+var nameOK = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidName reports whether a workspace name is safe to use as a path segment and
+// a branch name.
+func ValidName(name string) error {
+	if !nameOK.MatchString(name) {
+		return fmt.Errorf("workspace name %q is not allowed: use 1-64 chars of [A-Za-z0-9._-] starting with a letter or digit", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("workspace name %q is not allowed: %q would escape the workspace root", name, "..")
+	}
+	return nil
 }
 
 // New returns a Provisioner rooted at the relay's home directory.
@@ -34,8 +54,8 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 	if issues := fleet.Validate(spec); len(issues) > 0 {
 		return nil, fmt.Errorf("spec is invalid: %s", issues[0].Error())
 	}
-	if strings.TrimSpace(name) == "" {
-		return nil, fmt.Errorf("workspace name is required")
+	if err := ValidName(name); err != nil {
+		return nil, err
 	}
 
 	branch := spec.Workspace.BranchPrefix + name

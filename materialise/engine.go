@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,10 +71,14 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	// forbids secrets in the workspace record. The full error still goes to the
 	// caller, which decides what to log.
 	fail := func(where string, err error) (*Result, error) {
+		// The record gets a locator only; the detail goes to the relay's log, which
+		// is where the sanitised reason points the operator. Without this line that
+		// pointer led nowhere.
+		log.Printf("materialise %s: %s failed: %v", name, where, err)
 		if !e.DryRun {
 			_ = e.Prov.SetStateReason(name, workspace.StateUnhealthy, where+" failed; see the relay log")
 			if fresh, lerr := e.Prov.Load(name); lerr == nil && fresh != nil {
-				res.Workspace = fresh // (10) the failure path returned a pre-run snapshot too
+				res.Workspace = fresh // the failure path returned a pre-run snapshot too
 			}
 		}
 		return res, fmt.Errorf("%s: %w", where, err)
@@ -172,7 +177,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	// --- on_start: a lifecycle hook, not a seventh stage. It runs once the whole
 	// declared sequence has succeeded, and only then.
 	if h := m.Hooks; h != nil && h.OnStart != "" && len(res.Failed) == 0 {
-		step := Step{Stage: "hooks", Action: "on_start", Detail: h.OnStart}
+		step := Step{Stage: "hooks", Action: "on_start", Detail: interpolate(h.OnStart, rec.Vars)}
 		switch {
 		case e.DryRun:
 			step.Skipped, step.Reason = true, "dry run"

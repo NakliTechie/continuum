@@ -123,3 +123,26 @@ func TestMarkerFallsBackToTheQueueWithNoSubscriber(t *testing.T) {
 		t.Fatal("no marker queued and no subscriber to receive one — the drop was silent")
 	}
 }
+
+// The episode cap must hold on the fallback path too: queueing the marker is not
+// the client draining its backlog, so it must not re-arm the notifier.
+func TestQueueFallbackDoesNotReArmTheEpisodeFlag(t *testing.T) {
+	s := New(&config.Config{})
+	out := make(chan []byte, 8)
+	e := &sessionEntry{acp: &acp.Session{}, outbox: out}
+	s.addSession(e, "sess")
+
+	for i := 0; i < 5; i++ {
+		s.dropStructured(e, "sess")
+	}
+	var markers int
+	for len(out) > 0 {
+		var m map[string]any
+		if json.Unmarshal(<-out, &m); m["code"] == "frames_dropped" {
+			markers++
+		}
+	}
+	if markers != 1 {
+		t.Fatalf("markers queued during one episode = %d, want 1", markers)
+	}
+}

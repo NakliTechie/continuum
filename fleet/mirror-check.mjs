@@ -26,7 +26,7 @@ const goOut = execFileSync("go", ["run", "./fleet/cmd/fleetcheck", "-json", "./f
 const go = JSON.parse(goOut);
 
 let checked = 0, bad = 0;
-for (const dir of ["valid", "invalid", "secrets"]) {
+for (const dir of ["valid", "invalid", "secrets", "normalises"]) {
   for (const name of readdirSync(join(here, "testdata", dir)).filter((n) => n.endsWith(".json"))) {
     const key = `${dir}/${name}`;
     const text = readFileSync(join(here, "testdata", dir, name), "utf8");

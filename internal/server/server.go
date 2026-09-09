@@ -1029,8 +1029,13 @@ func (s *Server) dropStructured(e *sessionEntry, id string) {
 		}
 	}
 	// No subscriber, or the direct write failed: fall back to the queue, which is
-	// where the marker used to live. Best-effort by construction.
+	// where the marker used to live. Best-effort by construction — and trySend
+	// clears the episode flag on a successful queue, so re-set it: queueing the
+	// marker is not the client draining the backlog, and the episode is still on.
 	_, _ = e.trySend(marker)
+	e.outMu.Lock()
+	e.dropNotified = true
+	e.outMu.Unlock()
 }
 
 // trySend queues one frame on the outbox under outMu. It NEVER sends on a closed

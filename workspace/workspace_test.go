@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -185,5 +186,25 @@ func TestSetStateRecordsUnhealthySeparatelyFromReady(t *testing.T) {
 	rec, _ := p.Load("w1")
 	if rec.State != StateUnhealthy {
 		t.Errorf("state = %q, want %q", rec.State, StateUnhealthy)
+	}
+}
+
+// The workspace name reaches a filesystem path and a git branch name, so it is
+// refused rather than escaped.
+func TestProvisionRefusesUnsafeWorkspaceNames(t *testing.T) {
+	repo, home := testRepo(t), t.TempDir()
+	p := New(home)
+	for _, name := range []string{
+		"", "   ", "../escape", "a/b", "..", ".hidden", "-rf",
+		"with space", "tab\tname", "null\x00byte", strings.Repeat("x", 65),
+	} {
+		if _, err := p.Provision(specWithPorts(4900, 4909), repo, name); err == nil {
+			t.Errorf("name %q was accepted; it reaches a path and a branch name", name)
+		}
+	}
+	for _, name := range []string{"w1", "agent-3", "feature.x", "A_1"} {
+		if err := ValidName(name); err != nil {
+			t.Errorf("name %q should be allowed: %v", name, err)
+		}
 	}
 }
