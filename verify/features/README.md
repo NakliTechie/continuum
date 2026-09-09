@@ -9,3 +9,5 @@
 4. [Legacy](legacy.md) — Menagerie protocol compatibility.
 
 Every daemon uses a temporary private home/state and allocated loopback port. No installed relay is reused. No model providers are invoked. This automated gate does not replace the manual browser walk, native Linux execution, restart-surviving processes or remote-host release gates.
+
+The verifier sets disposable HOME and TMPDIR for every build, test, and check command and preserves only the existing Go cache/module locations. For raw `go test` runs, supply an isolated HOME/TMPDIR explicitly; inherited capture defaults otherwise target the normal Menagerie capture directory.

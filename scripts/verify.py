@@ -32,22 +32,30 @@ def main():
     features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy']
     with tempfile.TemporaryDirectory(prefix='continuum-verify-') as directory:
         temp = Path(directory)
+        home, tmp = temp / 'home', temp / 'tmp'
+        home.mkdir()
+        tmp.mkdir()
+        # Inherited capture defaults use HOME. Keep every fake capture away
+        # from the installed Menagerie directory while reusing only Go caches.
+        go_env = json.loads(subprocess.check_output(
+            ['go', 'env', '-json', 'GOCACHE', 'GOMODCACHE', 'GOPATH'], cwd=ROOT, text=True))
+        env = dict(os.environ, **go_env, HOME=str(home), TMPDIR=str(tmp))
         if 'core' in features:
-            run(['go', 'test', '-race', '-count=1', '-timeout=120s', './...'])
-            run(['go', 'vet', './...'])
+            run(['go', 'test', '-race', '-count=1', '-timeout=120s', './...'], env=env)
+            run(['go', 'vet', './...'], env=env)
         if 'cli' in features:
             binary = temp / 'continuum'
-            run(['go', 'build', '-o', str(binary), './cmd/continuum'])
-            run(['python3', 'scripts/check_cli.py', '--binary', str(binary)])
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
+            run(['python3', 'scripts/check_cli.py', '--binary', str(binary)], env=env)
         if 'terminal' in features:
             binary = temp / 'continuum-terminal'
-            run(['go', 'build', '-o', str(binary), './cmd/continuum'])
-            run(['python3', 'scripts/check_terminal.py', '--binary', str(binary), '--renewal'])
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
+            run(['python3', 'scripts/check_terminal.py', '--binary', str(binary), '--renewal'], env=env)
         if 'legacy' in features:
             relay, fake = temp / 'menagerie-relay', temp / 'fake-acp'
-            run(['go', 'build', '-o', str(relay), './cmd/menagerie-relay'])
-            run(['go', 'build', '-o', str(fake), './internal/server/testdata/fakeagent'])
-            env = dict(os.environ, CONTINUUM_TEST_RELAY=str(relay), CONTINUUM_TEST_ACP=str(fake))
+            run(['go', 'build', '-o', str(relay), './cmd/menagerie-relay'], env=env)
+            run(['go', 'build', '-o', str(fake), './internal/server/testdata/fakeagent'], env=env)
+            env = dict(env, CONTINUUM_TEST_RELAY=str(relay), CONTINUUM_TEST_ACP=str(fake))
             run(['go', 'test', '-race', '-tags=legacyintegration', '-count=1',
                  '-timeout=90s', './compat'], env=env)
     print(json.dumps({'class': 'ok', 'check': 'verify', 'features': features, 'checkout': str(ROOT)}))

@@ -8,3 +8,5 @@
 - Consult ~/Code/infra for relevant existing resources. Never read or reveal infra/secrets values for routine setup.
 - Do not install/replace the live Menagerie relay, restart agents, expose listeners, provision paid resources, or migrate existing data as a side effect of design or tests.
 - Prefer isolated test homes/ports; use local fake agents unless a real provider run is explicitly in scope. No tests should spend model credits implicitly.
+
+- Run `python3 scripts/verify.py verify [feature]` for the isolated gate. Raw `go test` on inherited packages needs an explicit temporary HOME/TMPDIR; preserve Go cache/module locations separately. Do not let fake captures use the normal Menagerie directory.
