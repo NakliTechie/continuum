@@ -35,3 +35,9 @@ Go provides goroutines and channels for concurrent work. This fits stream consum
 ## Local source
 
 See [menagerie-baseline.md](menagerie-baseline.md) for revision, paths, observed behaviors, and limits of validation. Specifications in this repository are our proposed synthesis; they do not describe shipped Superlogical or Continuum capabilities.
+
+## Terminal/session source research — 2026-09-09
+
+Cloned and inspected tmax, Ghostex, stacks2099 and its successor ptyZZZ, including the stacks journey and Ghostex's pinned zmx persistence dependency. The [release-planning crib sheet](research/terminal-session-crib-sheet-2026-09-09.md) separates code observations, author reports and recommendations; the [source manifest](research/terminal-session-sources-2026-09-09.json) pins revisions and local clones.
+
+The principal recommendation is to evaluate server-owned terminal state and query handling before broadening remote/client scope. Keep the Go runtime, test a bounded terminal-engine interface, and distinguish screen reconstruction from retained output and process survival. These are planning inputs; no runtime change or release commitment is implied. Upstream application tests and benchmarks were not run.
