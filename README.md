@@ -41,3 +41,9 @@ This scaffold does not replace the installed relay, copy its implementation, or 
 The first spec draft and source inventory are present. No daemon, CLI, remote listener, migration, or service has been installed or implemented. The first implementation milestone is a compatibility harness around the existing relay, followed by a bounded vertical slice with two viewers and recoverable events.
 
 Inherited code must retain Menagerie's AGPL-3.0 notices and attribution. Its license text is retained in this scaffold; no Menagerie runtime code has been copied.
+
+## First release deliverable
+
+An installable Go binary for macOS and Linux, combining host-daemon and CLI modes; a versioned API/agent contract; compatibility with Menagerie's browser; and install, upgrade, recovery and migration documentation. Release acceptance includes persistent session records/history, explicit process-survival limits, multiple observers with controlled input, local/remote directory operations, structured NDJSON streams, durable coordination, and workspace/service lifecycle.
+
+The first working milestone is smaller: launch work, disconnect every client, reconnect and recover output, then let a second viewer join without stealing control. Native applications, full SSH replacement and QUIC remain later milestones. See [legacy conformance](docs/legacy-conformance.md) for the first implementation slice and its limits.

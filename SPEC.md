@@ -2,13 +2,62 @@
 
 > **Lifecycle:** draft — 2026-09-09. Requirements derive from the owner request; technical choices below are recommended defaults, not individually owner-locked decisions.
 
-## 0. Agent contract — DRIVER pass scheduled
+## 0. Agent contract — DRIVER pass completed 2026-09-09
 
-This section is a preliminary interface brief, not a completed DRIVER pass. Run ntkit's DRIVER.md against this draft in the next design pass, as scheduled in plan/workplan.md.
+This pass applies ntkit DRIVER.md to the first spec draft. It defines design requirements, not shipped features. The remaining storage, packaging and sharing decisions stay explicitly open in walkthroughs.md.
 
-Humans and software use the same authorized operations. An agent can discover supported capabilities, inspect state, preview an operation, execute with a request ID, observe its outcome, and recover after a disconnect. No capability depends on an open browser or DOM manipulation. Read operations never acknowledge human attention or approve a pending action.
+### 0.1 One perception act
 
-Operations declare inputs, effects, required authority, result schema, stable error codes, cancellation semantics, and durability. Tool manifests must cover the actual command surface. An unimplemented operation is absent or explicitly unsupported; it must never return a fabricated success.
+`continuum status --json` is the proposed entry point: one bounded response containing protocol/capability versions, host reachability and observation age, active work counts, actionable attention items, capture degradation, pending approvals, outstanding operations and their next actions. Its snapshot is consistent per host, not globally atomic across disconnected hosts. Unreachable/unknown and stale last-known state are distinct from stopped or completed work. Reads never acknowledge attention, claim control, or resolve approvals.
+
+The default response contains at most 20 attention items and 64 KiB of JSON; return totals, truncation, a snapshot ID and cursor for the rest. Detail reads and history pages have explicit byte/event limits. Streaming is an opt-in operation with bounded buffers, deadline/cancellation and backpressure. Defaults do not print transcripts, secrets or an ever-growing inventory. A healthy human-readable summary is one line.
+
+### 0.2 Machine-decidable outcomes
+
+Separate work lifecycle from operation outcome and from transport health. A command envelope carries `schema_version`, `request_id`, `operation_id` when accepted, `class`, `code`, `durability`, and a typed `next_action`. Human prose explains; agents branch on codes. No success is inferred from missing data.
+
+| Class / CLI exit | Required next action |
+|---|---|
+| `ok` / 0 | Use the result; if asynchronous, inspect the returned operation ID. `accepted` never means work finished. |
+| `invalid_request` / 2 | Correct the named field using supported values; do not repeat unchanged. |
+| `access_denied` / 3 | Obtain the named scope from an authorized operator; never retry with broader credentials automatically. |
+| `decision_required` / 4 | Present the specific preview/permission request to the authorized decision-maker. |
+| `unreachable` / 5 | Reconnect with bounded backoff; retain the same operation identity. |
+| `conflict` / 6 | Refresh the named revision/control lease before acting. |
+| `history_gap` / 7 | Fetch the available snapshot/range; do not silently claim a complete transcript. |
+| `indeterminate` / 8 | Reconcile the operation/evidence; do not repeat a possibly executed mutation. |
+| `unsupported` / 9 | Choose an advertised alternative or a compatible runtime version. |
+| `resource_exhausted` / 10 | Resolve the named disk/buffer/quota limit before retrying. |
+
+This is a proposed CLI contract; legacy wire error codes remain unchanged in their adapter. Each error includes field/scope/resource identifiers, retryability, and `next_action {kind, operation, arguments}` drawn from a closed, schema-versioned vocabulary. Human help renders that action as an exact command without embedding credentials. Clients reject unknown required verdict semantics as indeterminate, preserving original data for diagnosis.
+
+### 0.3 Crash-safe intent, memory and authority
+
+Persist principal-scoped request ID, digest, intent, outcome and result locator outside client context. Same ID plus same request returns the existing operation; same ID plus different request conflicts. Persist before acknowledging durability, and record whether an external side effect is confirmed or uncertain. A crashed client can ask for the operation by ID; an uncertain process launch is reconciled, never blindly repeated. Cancellation stops observation unless an explicit authorized stop operation was requested.
+
+The runtime retains the trajectory: events, approvals, control changes, operation results and degraded-capture episodes. `status` renders the actionable state; bounded event/operation reads explain it. Agent-authored text is payload, never authority or a policy instruction. Exact command arguments and provenance are preserved subject to recording policy; tokens are excluded.
+
+### 0.4 Linked layers and accumulating evidence
+
+```text
+status / intent                     -> bounded situation and next action
+work session / workspace            -> related blocks, resources, ownership
+operation / wait / approval         -> effects, deadlines, durable outcomes
+block / subscription / control      -> lifecycle, observation, exclusive input
+adapters / execution / journal      -> host effects, ordering, recovery
+operator policy / verifier          -> authority and independent evidence
+```
+
+Higher-level operations return stable references to their lower-level evidence. Users can descend for detail without rediscovering state. Repeated unresolved failures keep their identity and attempted remedies so a new agent does not circle through the same failed action. A confirmed escaped defect becomes a named regression case; compatibility baselines are pinned and versioned rather than overwritten to make a failing test pass. These mechanisms accumulate knowledge; they do not self-authorize changes or learn policy from terminal output.
+
+### 0.5 Evaluator boundary
+
+Agent output and self-reported status are not evidence that a release gate passed. Verifiers execute independently from the workload and record their own inputs, version, exit/result and evidence locator. A workload cannot edit the policy or verifier through its granted API. If the workload shares an OS identity that can modify verifier files, isolation has not been established: report the resulting trust limit, never claim tamper-proof evaluation. Compromised, unavailable, stale or incomplete evidence yields indeterminate, not green. Retrying a command cannot weaken its evaluation threshold.
+
+### 0.6 Contract acceptance
+
+Test bounded status on a large fleet; stale/offline host reporting; exact closed outcomes and remedies; duplicate/conflicting request IDs; client crash after acceptance; uncertain side effects; cursor expiry; observer disconnect versus workload cancellation; approval fencing; and verifier unavailability. Manifest parity must hold across CLI, protocol and agent-facing tools. Human and agent surfaces call the same authorized core. Unsupported operations must remain visibly unsupported.
+
 
 ## 1. Goal and scope
 
@@ -119,7 +168,7 @@ Execute on_start/on_stop/on_destroy at the specified lifecycle transitions; reco
 
 | Family | Operations |
 |---|---|
-| Discovery | version, capabilities, hosts.list, host.inspect |
+| Discovery | status, version, capabilities, hosts.list, host.inspect |
 | Work | sessions.list/create/get, blocks.open/get/stop |
 | Observation | events.subscribe/read, streams.interleave, snapshots.get |
 | Control | control.acquire/release/takeover, input.send, terminal.resize |
