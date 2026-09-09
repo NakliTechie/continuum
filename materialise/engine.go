@@ -64,12 +64,19 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	// A stage that fails must leave the record honestly unhealthy. An early return
 	// used to strand it at `materialising` — neither ready nor unhealthy, and
 	// nothing would move it again.
-	fail := func(format string, a ...any) (*Result, error) {
-		err := fmt.Errorf(format, a...)
+	// `where` is a stage locator only — never the error text. A failed command's
+	// combined output can carry anything the command printed, including a
+	// credential, and the record is persisted to the relay's disk; the handoff
+	// forbids secrets in the workspace record. The full error still goes to the
+	// caller, which decides what to log.
+	fail := func(where string, err error) (*Result, error) {
 		if !e.DryRun {
-			_ = e.Prov.SetStateReason(name, workspace.StateUnhealthy, err.Error())
+			_ = e.Prov.SetStateReason(name, workspace.StateUnhealthy, where+" failed; see the relay log")
+			if fresh, lerr := e.Prov.Load(name); lerr == nil && fresh != nil {
+				res.Workspace = fresh // (10) the failure path returned a pre-run snapshot too
+			}
 		}
-		return res, err
+		return res, fmt.Errorf("%s: %w", where, err)
 	}
 
 	// --- 1. ports (via the provisioner, which owns allocation and the record) ---
@@ -102,7 +109,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, f := range m.Files {
 		step, err := e.materialiseFile(f, rec, repoRoot)
 		if err != nil {
-			return fail("files[%d]: %w", i, err)
+			return fail(fmt.Sprintf("files[%d]", i), err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -111,7 +118,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, c := range m.Commands {
 		step, err := e.runCommand(c, rec, repoRoot)
 		if err != nil {
-			return fail("commands[%d]: %w", i, err)
+			return fail(fmt.Sprintf("commands[%d]", i), err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -120,7 +127,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, sv := range m.Services {
 		step, err := e.startService(sv, rec, repoRoot)
 		if err != nil {
-			return fail("services[%d]: %w", i, err)
+			return fail(fmt.Sprintf("services[%d]", i), err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -136,11 +143,11 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 
 	// --- 6. escape, last, with every variable exported ---
 	if m.Escape != "" {
-		step := Step{Stage: "escape", Action: "run", Detail: m.Escape}
+		step := Step{Stage: "escape", Action: "run", Detail: interpolate(m.Escape, rec.Vars)}
 		if e.DryRun {
 			step.Skipped, step.Reason = true, "dry run"
 		} else if _, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), interpolate(m.Escape, rec.Vars), 10*time.Minute); err != nil {
-			return fail("escape: %w", err)
+			return fail("escape", err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -278,7 +285,7 @@ func (e *Engine) runCommand(c fleet.Command, rec *workspace.Record, repoRoot str
 // per-workspace instance. A service already up is left alone (D3).
 func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot string) (Step, error) {
 	scope := repoRoot + "|" + sv.Name
-	if strings.TrimSpace(sv.PortVar) != "" {
+	if sv.PortVar != "" {
 		scope += "|" + rec.Name
 	}
 	line := interpolate(sv.Run, rec.Vars)

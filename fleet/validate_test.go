@@ -26,6 +26,7 @@ var invalidWantPath = map[string]string{
 	"supervise-without-port-var.json":     "/workspace/materialise/services/0/supervise",
 	"hook-undeclared-var.json":            "/workspace/materialise/hooks/on_start",
 	"supervise-with-blank-port-var.json":  "/workspace/materialise/services/0/supervise",
+	"padded-unknown-probe.json":           "/workspace/materialise/health/0/probe",
 }
 
 func read(t *testing.T, dir, name string) []byte {
@@ -54,8 +55,8 @@ func names(t *testing.T, dir string) []string {
 
 func TestValidFixturesPass(t *testing.T) {
 	fs := names(t, "valid")
-	if len(fs) != 7 {
-		t.Fatalf("valid fixtures = %d, want 7", len(fs))
+	if len(fs) != 10 {
+		t.Fatalf("valid fixtures = %d, want 10", len(fs))
 	}
 	for _, n := range fs {
 		if _, issues := ValidateBytes(read(t, "valid", n)); len(issues) > 0 {
@@ -66,8 +67,8 @@ func TestValidFixturesPass(t *testing.T) {
 
 func TestInvalidFixturesRejectedAtTheRightPath(t *testing.T) {
 	fs := names(t, "invalid")
-	if len(fs) != 15 {
-		t.Fatalf("invalid fixtures = %d, want 15", len(fs))
+	if len(fs) != 16 {
+		t.Fatalf("invalid fixtures = %d, want 16", len(fs))
 	}
 	for _, n := range fs {
 		want, ok := invalidWantPath[n]
@@ -180,5 +181,64 @@ func TestFileDestinationCannotEscapeWorkspace(t *testing.T) {
 		if !found {
 			t.Errorf("destination %q was accepted", to)
 		}
+	}
+}
+
+// Normalisation is the invariant the engine depends on: a padded value must never
+// reach a consumer, because a validator more permissive than its consumer is
+// worse than one that is stricter. A padded probe kind used to validate clean and
+// then run the wrong branch.
+func TestValidateNormalisesInPlace(t *testing.T) {
+	s := &Spec{
+		Spec: " " + SpecVersion + " ", Name: " x ", Repo: " . ", Topology: " flat ",
+		Workspace: Workspace{Isolation: "  worktree  ", Materialise: Materialise{
+			Ports:    []Port{{Name: " PORT ", Range: [2]int{4000, 4001}}},
+			Files:    []File{{From: " a.env ", Template: "   ", To: " .env "}},
+			Commands: []Command{{Run: " setup ", CacheKey: " lock.json "}},
+			Services: []Service{{Name: " db ", Run: " start ", PortVar: " PORT ", Supervise: true}},
+			Health:   []Probe{{Probe: "http ", URL: " http://x/h ", TimeoutS: 1}},
+			Escape:   " ./b.sh ",
+			Hooks:    &Hooks{OnStart: " announce "},
+		}},
+		Roster: []Role{{Role: " worker ", Agent: " codex ", Count: 1}},
+	}
+	if issues := Validate(s); len(issues) > 0 {
+		t.Fatalf("a spec that is valid once trimmed was rejected: %v", issues)
+	}
+	m := s.Workspace.Materialise
+	for label, got := range map[string]string{
+		"spec": s.Spec, "name": s.Name, "repo": s.Repo, "topology": s.Topology,
+		"isolation": s.Workspace.Isolation, "port": m.Ports[0].Name, "from": m.Files[0].From,
+		"to": m.Files[0].To, "run": m.Commands[0].Run, "cache_key": m.Commands[0].CacheKey,
+		"svc.name": m.Services[0].Name, "svc.run": m.Services[0].Run, "port_var": m.Services[0].PortVar,
+		"probe": m.Health[0].Probe, "url": m.Health[0].URL, "escape": m.Escape,
+		"on_start": m.Hooks.OnStart, "role": s.Roster[0].Role, "agent": s.Roster[0].Agent,
+	} {
+		if got != strings.TrimSpace(got) || got == "" {
+			t.Errorf("%s = %q, want it trimmed and non-empty", label, got)
+		}
+	}
+	// A whitespace-only field normalises to absent, which is what makes the
+	// from/template exclusivity check agree with the engine's source pick.
+	if m.Files[0].Template != "" {
+		t.Errorf("whitespace-only template = %q, want empty", m.Files[0].Template)
+	}
+	if m.Health[0].Probe != "http" {
+		t.Errorf("probe = %q, want %q — the engine dispatches on this exact value", m.Health[0].Probe, "http")
+	}
+}
+
+// The D4 lint must not fail open. A line over any internal buffer used to end the
+// scan as though the document were fully read, so a credential on or after it was
+// missed and the spec passed.
+func TestSecretLintSurvivesAnEnormousLine(t *testing.T) {
+	huge := strings.Repeat("x", 5<<20)
+	doc := []byte(`{"a":"` + huge + `",` + "\n" + `"b":"AKIAIOSFODNN7EXAMPLE"}`)
+	issues := LintSecrets(doc)
+	if len(issues) == 0 {
+		t.Fatal("a credential after a 5MB line was missed — the lint failed open")
+	}
+	if issues[0].Code != "secret_in_spec" {
+		t.Errorf("issue = %v, want secret_in_spec", issues[0])
 	}
 }

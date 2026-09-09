@@ -96,10 +96,16 @@ type Service struct {
 	Name    string `json:"name"`
 	Run     string `json:"run"`
 	PortVar string `json:"port_var,omitempty"`
-	// Supervise keeps checking the service after its health probe passed. A
-	// probe is a moment, not a guarantee: without this, a service that dies a
-	// second later leaves the workspace reading `ready` while it is broken.
-	// Supervision needs something concrete to check, so it requires PortVar.
+	// Supervise re-checks the service after its health probe passed, during each
+	// materialise pass. A probe is a moment, not a guarantee.
+	//
+	// It is NOT yet continuous: nothing polls between passes, because
+	// Engine.Supervise has no caller until C5 wires a cadence. A service that dies
+	// between passes is therefore not noticed until the next materialise. Said
+	// plainly because a promise the code does not keep is worse than an absent
+	// feature. Supervision needs something concrete to check, so it requires
+	// PortVar — and PortVar must name an allocated port, not merely an
+	// interpolatable name.
 	Supervise bool `json:"supervise,omitempty"`
 }
 

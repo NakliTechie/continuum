@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"regexp"
@@ -31,12 +30,13 @@ var secretPatterns = []struct {
 // field this version does not model is still caught.
 func LintSecrets(b []byte) []Issue {
 	var out []Issue
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	sc.Buffer(make([]byte, 64*1024), 4<<20)
-	line := 0
-	for sc.Scan() {
-		line++
-		text := sc.Text()
+	// bytes.Split, not bufio.Scanner: the scanner has a token cap, and a line over
+	// it ended the loop as though the document were fully read — so a credential
+	// on or after an over-long line was silently missed and the spec passed. A
+	// lint that cannot finish must never look like a lint that passed.
+	for i, lineBytes := range bytes.Split(b, []byte("\n")) {
+		line := i + 1
+		text := string(lineBytes)
 		for _, p := range secretPatterns {
 			if p.re.MatchString(text) {
 				out = append(out, Issue{

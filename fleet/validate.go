@@ -36,26 +36,31 @@ func ValidateBytes(b []byte) (*Spec, []Issue) {
 	return &s, Validate(&s)
 }
 
-// Validate returns every issue in the spec, in document order. An empty slice
-// means the spec is safe to execute.
+// Validate normalises the spec IN PLACE and then returns every issue in it, in
+// document order. An empty slice means the spec is safe to execute.
+//
+// The in-place normalisation is deliberate and load-bearing: the engine must
+// never see a string the validator did not see. Every engine entry point calls
+// Validate first, so this is the single point where whitespace stops mattering.
 func Validate(s *Spec) []Issue {
+	s.normalize()
 	var out []Issue
 	add := func(path, code, msg string) { out = append(out, Issue{Path: path, Code: code, Message: msg}) }
 
-	if strings.TrimSpace(s.Spec) == "" {
+	if s.Spec == "" {
 		add("/spec", "required", "spec is required and must be "+SpecVersion)
 	} else if s.Spec != SpecVersion {
 		add("/spec", "unsupported_version", "unsupported spec version "+s.Spec+", want "+SpecVersion)
 	}
-	if strings.TrimSpace(s.Name) == "" {
+	if s.Name == "" {
 		add("/name", "required", "name is required")
 	}
-	if strings.TrimSpace(s.Repo) == "" {
+	if s.Repo == "" {
 		add("/repo", "required", "repo is required (\".\" for the spec's own repo)")
 	}
 	// Required with no default, deliberately: an unnamed topology is the first
 	// specification failure in a multi-agent run.
-	if strings.TrimSpace(s.Topology) == "" {
+	if s.Topology == "" {
 		add("/topology", "required", "topology is required and has no default — name it")
 	}
 
@@ -80,9 +85,9 @@ func Validate(s *Spec) []Issue {
 		}
 	}
 
-	isolation := strings.TrimSpace(s.Workspace.Isolation)
+	isolation := s.Workspace.Isolation
 	if isolation == "" && len(s.Workspace.Materialise.Ports)+len(s.Workspace.Materialise.Files)+
-		len(s.Workspace.Materialise.Commands) == 0 && strings.TrimSpace(s.Workspace.Materialise.Escape) == "" {
+		len(s.Workspace.Materialise.Commands) == 0 && s.Workspace.Materialise.Escape == "" {
 		add("/workspace", "required", "workspace is required and must declare an isolation and a materialise block")
 	}
 	if isolation != "" && isolation != "worktree" {
@@ -95,14 +100,14 @@ func Validate(s *Spec) []Issue {
 
 	for i, f := range s.Workspace.Materialise.Files {
 		base := fmt.Sprintf("/workspace/materialise/files/%d", i)
-		from, tmpl := strings.TrimSpace(f.From) != "", strings.TrimSpace(f.Template) != ""
+		from, tmpl := f.From != "", f.Template != ""
 		switch {
 		case !from && !tmpl:
 			add(base, "required", "file entry needs exactly one of from (copy) or template (render)")
 		case from && tmpl:
 			add(base, "exclusive", "file entry has both from and template; exactly one is allowed")
 		}
-		if strings.TrimSpace(f.To) == "" {
+		if f.To == "" {
 			add(base+"/to", "required", "file entry needs a destination path")
 		}
 		if strings.HasPrefix(f.To, "/") || strings.Contains(f.To, "..") {
@@ -117,40 +122,40 @@ func Validate(s *Spec) []Issue {
 	}
 	for i, c := range s.Workspace.Materialise.Commands {
 		base := fmt.Sprintf("/workspace/materialise/commands/%d", i)
-		if strings.TrimSpace(c.Run) == "" {
+		if c.Run == "" {
 			add(base+"/run", "required", "command entry needs a run string")
 		}
 		out = append(out, undeclaredVars(base+"/run", c.Run, declared)...)
 	}
 	for i, sv := range s.Workspace.Materialise.Services {
 		base := fmt.Sprintf("/workspace/materialise/services/%d", i)
-		if strings.TrimSpace(sv.Name) == "" {
+		if sv.Name == "" {
 			add(base+"/name", "required", "service entry needs a name")
 		}
-		if strings.TrimSpace(sv.Run) == "" {
+		if sv.Run == "" {
 			add(base+"/run", "required", "service entry needs a run string")
 		}
-		if strings.TrimSpace(sv.PortVar) != "" && !portNames[sv.PortVar] {
+		if sv.PortVar != "" && !portNames[sv.PortVar] {
 			add(base+"/port_var", "undeclared_var", "port_var "+sv.PortVar+" is not a declared port")
 		}
 		// Supervision must have something to check. A supervised service with no
 		// port would degrade to "assume it is fine", which is the failure this
 		// field exists to prevent.
-		if sv.Supervise && strings.TrimSpace(sv.PortVar) == "" {
+		if sv.Supervise && sv.PortVar == "" {
 			add(base+"/supervise", "requires_port_var", "supervise needs port_var: without a port there is nothing to check after the probe passes")
 		}
 		out = append(out, undeclaredVars(base+"/run", sv.Run, declared)...)
 	}
 	for i, p := range s.Workspace.Materialise.Health {
 		base := fmt.Sprintf("/workspace/materialise/health/%d", i)
-		switch strings.TrimSpace(p.Probe) {
+		switch p.Probe {
 		case "http":
-			if strings.TrimSpace(p.URL) == "" {
+			if p.URL == "" {
 				add(base+"/url", "required", "http probe needs a url")
 			}
 			out = append(out, undeclaredVars(base+"/url", p.URL, declared)...)
 		case "command":
-			if strings.TrimSpace(p.Run) == "" {
+			if p.Run == "" {
 				add(base+"/run", "required", "command probe needs a run string")
 			}
 			out = append(out, undeclaredVars(base+"/run", p.Run, declared)...)
@@ -179,10 +184,10 @@ func Validate(s *Spec) []Issue {
 	}
 	for i, r := range s.Roster {
 		base := fmt.Sprintf("/roster/%d", i)
-		if strings.TrimSpace(r.Agent) == "" {
+		if r.Agent == "" {
 			add(base+"/agent", "required", "role needs an agent")
 		}
-		if strings.TrimSpace(r.Role) == "" {
+		if r.Role == "" {
 			add(base+"/role", "required", "role needs a role name")
 		}
 		if r.Count < 1 {

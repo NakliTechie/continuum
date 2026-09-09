@@ -3,8 +3,11 @@ package materialise
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NakliTechie/menagerie/relay-go/fleet"
 	"github.com/NakliTechie/menagerie/relay-go/workspace"
@@ -147,4 +150,42 @@ func TestEscapeIsInterpolatedAndItsVarsValidated(t *testing.T) {
 	if !flagged {
 		t.Error("an undeclared var in escape was not flagged")
 	}
+}
+
+// A failed command's combined output must never reach the persisted record: the
+// record is on the relay's disk and the handoff forbids secrets there. A setup
+// command that echoes a credential while failing used to put it in `reason`.
+func TestAFailedCommandsOutputNeverReachesTheRecord(t *testing.T) {
+	repo, home := testRepo(t), t.TempDir()
+	e := New(workspace.New(home))
+	e.Exec = &leakyExecutor{}
+	spec := &fleet.Spec{
+		Spec: fleet.SpecVersion, Name: "t", Repo: ".", Topology: "flat",
+		Workspace: fleet.Workspace{Isolation: "worktree", Materialise: fleet.Materialise{
+			Commands: []fleet.Command{{Run: "setup"}}}},
+		Roster: []fleet.Role{{Role: "worker", Agent: "codex", Count: 1}},
+	}
+	if _, err := e.Run(spec, repo, "w"); err == nil {
+		t.Fatal("expected the failing command to error")
+	}
+	rec, _ := e.Prov.Load("w")
+	if strings.Contains(rec.Reason, "AKIA") || strings.Contains(rec.Reason, "hunter2") {
+		t.Fatalf("the record's reason carries command output: %q", rec.Reason)
+	}
+	if rec.State != workspace.StateUnhealthy {
+		t.Errorf("state = %q, want unhealthy", rec.State)
+	}
+	// The failure path must also return a fresh snapshot, not the pre-run one.
+	raw, _ := os.ReadFile(filepath.Join(home, "workspaces.json"))
+	if strings.Contains(string(raw), "AKIA") {
+		t.Error("the credential reached workspaces.json on disk")
+	}
+}
+
+// leakyExecutor fails while printing something credential-shaped, the way a real
+// setup command echoing its environment would.
+type leakyExecutor struct{}
+
+func (leakyExecutor) Run(dir string, env []string, cmdline string, timeout time.Duration) ([]byte, error) {
+	return []byte("connecting with AKIAIOSFODNN7EXAMPLE / hunter2\n"), fmt.Errorf("exit status 1")
 }
