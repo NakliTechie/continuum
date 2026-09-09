@@ -25,6 +25,7 @@ import (
 	"github.com/NakliTechie/continuum/internal/config"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/server"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const Version = "0.1.0-alpha.1"
@@ -40,9 +41,12 @@ Commands:
   serve                    run a foreground local daemon; Ctrl-C stops its work
   status                   inspect up to 20 recorded blocks without taking control
   open -- COMMAND ARGS     launch a PTY; arguments are preserved exactly
+  attach --block ID        interactive screen-v1 terminal; Ctrl-] detaches
+  screen --block ID        inspect a current/final screen without taking control
   events --block ID        replay bounded recorded events; --follow keeps watching
   acquire --block ID       acquire 60-second input control and save it privately
   takeover --block ID      explicitly fence an existing controller
+  renew --block ID         extend your current saved control lease
   release --block ID       release your saved control lease
   input --block ID         send stdin bytes using your saved lease
   resize --block ID --cols N --rows N
@@ -54,6 +58,9 @@ Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
 Events: --after CURSOR, --follow, --text (decode PTY bytes; trusted output only).
 Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
 Observation: --observer uses the read-only observer credential.
+Terminal: open --terminal screen-v1 -- COMMAND opts into server-owned screens.
+Attach: --observer is read-only; --takeover explicitly replaces a controller.
+Keyboard only; complex Unicode and advanced TUI compatibility are experimental.
 
 This alpha recovers records after daemon restart; running processes do not survive.
 Menagerie can use the same daemon's legacy WebSocket endpoint with operator.token.
@@ -149,6 +156,8 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	rows := f.Int("rows", 24, "terminal rows")
 	listen := f.String("listen", "127.0.0.1:0", "loopback address")
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
+	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
+	take := f.Bool("takeover", false, "explicitly take control when attaching")
 	if err := f.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(out, help)
@@ -172,7 +181,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return 0
 	}
 	switch command {
-	case "status", "open", "events", "acquire", "takeover", "release", "input", "resize", "stop":
+	case "status", "open", "screen", "attach", "events", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
 	default:
 		fmt.Fprintln(diag, "unknown command; run continuum help")
 		return 2
@@ -189,8 +198,23 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		fmt.Fprintln(diag, "--follow is for events")
 		return 2
 	}
-	q := api.Request{Cursor: *cursor, Operation: command, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
-	mut := command != "status" && command != "events"
+	if *profile != "" && command != "open" {
+		fmt.Fprintln(diag, "--terminal is for open")
+		return 2
+	}
+	if *take && command != "attach" {
+		fmt.Fprintln(diag, "--takeover is for attach")
+		return 2
+	}
+	if command == "attach" {
+		if *machine || *request != "" {
+			fmt.Fprintln(diag, "attach is interactive; use screen --json for machine output")
+			return 2
+		}
+		return attach(*state, *block, *observer, *take, in, out, diag)
+	}
+	q := api.Request{Terminal: *profile, Cursor: *cursor, Operation: command, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
+	mut := !readOperation(command)
 	if mut && q.RequestID == "" {
 		q.RequestID = journal.ID()
 	}
@@ -215,7 +239,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		q.Data = string(data)
 	}
 	leasePath := ""
-	if command == "input" || command == "resize" || command == "stop" || command == "release" || command == "acquire" || command == "takeover" {
+	if command == "input" || command == "resize" || command == "stop" || command == "release" || command == "renew" || command == "acquire" || command == "takeover" {
 		if len(*block) != 16 {
 			return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full block ID from status or open", "status"), *machine, out, diag)
 		}
@@ -252,6 +276,17 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		}
 		if v.Class == "ok" && command == "release" {
 			_ = os.Remove(leasePath)
+		}
+		if command == "screen" && v.Class == "ok" && !*machine {
+			frame, err := decodeScreen(v, *block)
+			if err != nil {
+				return render(api.Error(q.RequestID, "indeterminate", "invalid_screen", "invalid screen response", "status"), false, out, diag)
+			}
+			fmt.Fprintf(out, "Block %s • %s • %dx%d • revision %d (volatile)\n", frame.Block, frame.State, frame.Frame.Cols, frame.Frame.Rows, frame.Frame.Revision)
+			for _, line := range frame.Frame.ANSI {
+				fmt.Fprintln(out, strings.TrimRight(ansi.Strip(displayRow(line, frame.Frame.Cols)), " "))
+			}
+			return 0
 		}
 		if command != "events" || v.Class != "ok" {
 			return render(v, *machine, out, diag)
@@ -345,14 +380,18 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
-		if q.Operation != "status" && q.Operation != "events" {
+		if !readOperation(q.Operation) {
 			return api.Error(q.RequestID, "indeterminate", "transport_lost", "request may have executed; retry with the same --request-id to reconcile", "status")
 		}
 		return fail("daemon_unreachable", "daemon is unreachable; inspect or start it")
 	}
 	defer resp.Body.Close()
 	var v api.Response
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil || v.Version != 1 || v.Class == "" {
+	limit := int64(1 << 20)
+	if q.Operation == "screen" {
+		limit = 32 << 20
+	}
+	if err = json.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(&v); err != nil || v.Version != 1 || v.Class == "" {
 		return api.Error(q.RequestID, "indeterminate", "invalid_response", "response contract is unavailable", "status")
 	}
 	return v
@@ -428,3 +467,5 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	}
 	return modern.CleanShutdown()
 }
+
+func readOperation(op string) bool { return op == "status" || op == "events" || op == "screen" }

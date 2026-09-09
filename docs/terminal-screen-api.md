@@ -7,3 +7,13 @@ The authenticated, read-only `screen` operation accepts a block ID and returns a
 PTY output parsing, server query replies and resize are serialized per terminal. User input and generated replies use indivisible bounded PTY writes. Modern control leases still fence input and resize. Query-write failure makes the terminal screen fault explicit without claiming the raw journal is corrupted. The unchanged legacy browser cannot attach to a screen-v1 block: the runtime returns `terminal_profile_required` before taking control. Its raw PTY and ACP sessions remain compatible.
 
 The API/PTy tests exercise a real child with a known initial size and no attached client; it requests cursor and operating status, verifies both replies, receives controller input and emits a checked final frame. They also cover observer refusal for resize, observer reads without resize/takeover, stale-controller fencing, legacy attach rejection without fencing modern control, admission limits and terminal-fault propagation. These do not establish browser rendering of screen-v1 or full-screen application fidelity.
+
+## Input and renewal
+
+`terminal_input_base64` advertises byte-preserving input: an `input` request with `encoding: "base64"` decodes `data` before writing it, only for screen-v1. Invalid base64, unknown encodings and decoded input above 64 KiB are refused. Omitted encoding retains the existing UTF-8 API. `encoding` is invalid on other operations.
+
+`control_renewal` advertises the `renew` mutation. A valid current lease extends to 60 seconds from the renewal; its token stays unchanged. The request ID is idempotent, including the saved expiration result. Observers and stale controllers cannot renew. Both input and renewal require durable operation intent and count against the alpha's operation limit.
+
+The interactive CLI polls full frames every 75 ms, sends bounded byte batches, renews every 20 seconds and reserves Ctrl-] for detach. It never asks the outer terminal to answer application queries. The frame renderer permits printable text and numeric SGR styling only; application OSC, DCS and query sequences are not replayed to a viewer. Cursor/application-cursor and bracketed-paste modes are propagated within the documented renderer subset. Observer viewports crop; only controllers resize the process.
+
+Controller attach checks all three advertised terminal capabilities before acquiring control, resizing, or entering raw mode. Older screen-only daemons remain usable with `attach --observer`.

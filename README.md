@@ -68,7 +68,20 @@ Use the block ID returned by `open`. A second `events` command joins as an obser
 
 Metadata and retained history survive restart; processes do not in this alpha. Recovered active records become `interrupted`. History from an unclean daemon epoch is conservatively marked incomplete, including exited blocks; the event API returns an `indeterminate` envelope with the retained events. Retention-expired cursors return `history_gap` and the available range. Fresh work after recovery has its own complete/incomplete record. Live capture failure refuses further durable mutations.
 
-Content recording is enabled by default, bounded to 8 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also caps recorded blocks at 1024 and operation identities at 4096. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB; `--text` emits terminal control bytes and is for trusted output. JSON/NDJSON retains encoded payloads. The CLI is not yet an interactive terminal emulator.
+Content recording is enabled by default, bounded to 8 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also caps recorded blocks at 1024 and operation identities at 4096. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB; `--text` emits terminal control bytes and is for trusted output. JSON/NDJSON retains encoded payloads. Experimental interactive terminal attachment is available for the opt-in screen-v1 profile below.
+
+### Experimental interactive terminals
+
+```sh
+./bin/continuum open --terminal screen-v1 -- /bin/sh
+./bin/continuum attach --block BLOCK_ID
+# In another terminal:
+./bin/continuum attach --block BLOCK_ID --observer
+```
+
+Ctrl-] detaches and leaves the child running. Attach again to recover the current server-owned screen; `screen --block BLOCK_ID` reads it without entering a full-screen view. A controller renews its 60-second lease automatically; `attach --takeover` explicitly fences an existing controller. Observers never send input or resize the child. Use `screen --json` for machine-readable frames.
+
+The experimental engine is a bounded Go adapter around Charm's VT implementation. It owns terminal query replies even with no viewers. Frames are volatile, polled snapshots of the visible screen; raw events remain separately recorded. Up to 16 screen-v1 processes are active at once and the last 16 exited frames remain until eviction/restart. Mouse, extended keyboard protocols, complex Unicode fidelity and full TUI conformance remain future work. Screen-v1 cannot use the unchanged Menagerie browser's legacy attach. See [terminal API](docs/terminal-screen-api.md), [engine decision and limits](docs/terminal-engine.md), and [terminal verification](verify/features/terminal.md).
 
 ### Use with Menagerie
 

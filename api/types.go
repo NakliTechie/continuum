@@ -11,6 +11,7 @@ type Request struct {
 	Block     string   `json:"block_id,omitempty"`
 	Args      []string `json:"args,omitempty"`
 	Cwd       string   `json:"cwd,omitempty"`
+	Encoding  string   `json:"encoding,omitempty"`
 	Data      string   `json:"data,omitempty"`
 	Lease     string   `json:"lease,omitempty"`
 	After     uint64   `json:"after,omitempty"`

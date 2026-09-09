@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"github.com/NakliTechie/continuum/internal/pty"
@@ -153,7 +154,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			next = b.ID
 		}
 		blocks = page
-		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": false})
+		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1", "terminal_input_base64", "control_renewal"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": false})
 		return v
 	case "events":
 		p, err := m.Store.Read(q.After, q.Block)
@@ -182,7 +183,7 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		return api.Error(q.RequestID, "invalid_request", code, msg, "help")
 	}
 	switch q.Operation {
-	case "open", "acquire", "takeover", "release", "input", "resize", "stop":
+	case "open", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
 	default:
 		return api.Error(q.RequestID, "unsupported", "operation", "unsupported operation", "help")
 	}
@@ -215,6 +216,26 @@ func (m *Modern) mutate(q api.Request) api.Response {
 	}
 	if q.Operation == "resize" && (q.Cols < 1 || q.Cols > 1000 || q.Rows < 1 || q.Rows > 1000) {
 		return bad("size", "columns and rows must be between 1 and 1000")
+	}
+	if q.Operation == "input" {
+		switch q.Encoding {
+		case "":
+			if len(q.Data) > 64<<10 {
+				return bad("input_size", "input supports at most 64 KiB")
+			}
+		case "base64":
+			data, err := base64.StdEncoding.DecodeString(q.Data)
+			if err != nil {
+				return bad("input_encoding", "invalid base64 input")
+			}
+			if len(data) > 64<<10 {
+				return bad("input_size", "input supports at most 64 KiB")
+			}
+		default:
+			return bad("input_encoding", "supported input encodings: UTF-8 text or base64 for screen-v1")
+		}
+	} else if q.Encoding != "" {
+		return bad("input_encoding", "encoding is only valid for input")
 	}
 	if m.degraded.Load() {
 		return api.Error(q.RequestID, "resource_exhausted", "capture_degraded", "repair storage and restart before new mutations", "status")
@@ -305,6 +326,11 @@ func (m *Modern) effect(q api.Request) api.Response {
 	if !current.Expires.After(time.Now()) || q.Lease == "" || subtle.ConstantTimeCompare([]byte(current.Token), []byte(q.Lease)) != 1 || m.s.authSession(q.Block, q.Lease) == nil {
 		return fail("conflict", "stale_control", "control expired or was taken over; acquire current control", "acquire")
 	}
+	if q.Operation == "renew" {
+		current.Expires = time.Now().Add(60 * time.Second)
+		m.leases[q.Block] = current
+		return api.Result(q.RequestID, map[string]any{"block_id": q.Block, "expires_at": current.Expires.UTC().Format(time.RFC3339Nano)})
+	}
 	if q.Operation == "release" {
 		m.s.reissueToken(q.Block, journal.ID())
 		delete(m.leases, q.Block)
@@ -323,7 +349,14 @@ func (m *Modern) effect(q api.Request) api.Response {
 	}
 	var err error
 	if q.Operation == "input" {
-		err = sess.Write([]byte(q.Data))
+		data := []byte(q.Data)
+		if q.Encoding == "base64" {
+			if !sess.HasTerminal() {
+				return fail("unsupported", "terminal_profile_required", "binary input requires screen-v1", "help")
+			}
+			data, _ = base64.StdEncoding.DecodeString(q.Data) // validated before intent
+		}
+		err = sess.Write(data)
 	} else {
 		err = sess.Resize(q.Cols, q.Rows)
 	}

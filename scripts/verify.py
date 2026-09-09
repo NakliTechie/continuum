@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Worktree-safe verifier: doctor | verify [core|cli|legacy]. No live endpoint reuse."""
+"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy]. No live endpoint reuse."""
 import argparse
 import json
 import os
@@ -16,7 +16,7 @@ def run(args, **kwargs):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['doctor', 'verify'])
-    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'legacy'])
+    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy'])
     opts = p.parse_args()
     missing = [name for name in ['go', 'git', 'python3'] if not shutil.which(name)]
     if missing:
@@ -29,7 +29,7 @@ def main():
                           'go': version, 'mode': 'fresh temporary binaries/state per run',
                           'browser': 'manual Menagerie compatibility journey; not covered by this script'}))
         return
-    features = [opts.feature] if opts.feature else ['core', 'cli', 'legacy']
+    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy']
     with tempfile.TemporaryDirectory(prefix='continuum-verify-') as directory:
         temp = Path(directory)
         if 'core' in features:
@@ -39,6 +39,10 @@ def main():
             binary = temp / 'continuum'
             run(['go', 'build', '-o', str(binary), './cmd/continuum'])
             run(['python3', 'scripts/check_cli.py', '--binary', str(binary)])
+        if 'terminal' in features:
+            binary = temp / 'continuum-terminal'
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'])
+            run(['python3', 'scripts/check_terminal.py', '--binary', str(binary), '--renewal'])
         if 'legacy' in features:
             relay, fake = temp / 'menagerie-relay', temp / 'fake-acp'
             run(['go', 'build', '-o', str(relay), './cmd/menagerie-relay'])

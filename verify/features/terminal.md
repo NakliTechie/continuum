@@ -1,0 +1,9 @@
+# Terminal
+
+Exists: opt-in `open --terminal screen-v1`, `screen [--json]`, interactive `attach`, `attach --observer`, explicit `--takeover`, keyboard input, controller resize, in-memory lease renewal and Ctrl-] detach. No provider credential is required.
+
+Reach: start `continuum serve --state /absolute/private/path`; open `continuum open --state /absolute/private/path --terminal screen-v1 -- /bin/sh`; use the returned full block ID with `continuum attach --state /absolute/private/path --block BLOCK_ID`. Join a second terminal with `--observer`. View a finished block with `screen --block BLOCK_ID`.
+
+Verify: `python3 scripts/verify.py verify terminal` builds the real executable, starts disposable daemon/app/viewer PTYs and holds control beyond its initial 60-second lease. It checks detached cursor-query replies, two viewers, observer input/resize refusal, byte-exact split UTF-8/Ctrl-C input, controller resizing, terminal settings restoration, detach/reconnect without respawn, final screen and child exit status. The child is a local deterministic Python fixture. Unit/race checks live in `internal/terminal`, `internal/pty`, `internal/server` and `internal/cli`.
+
+Watch: frames are full visible snapshots, volatile and polled, not raw replay or parser-state serialization. A small observer crops without resizing the process. Ctrl-] is reserved and cannot be sent to the child. A controller reserves one local row for status. Attach requires TTY stdin/stdout; `screen --json` works in pipes. Failed input is not retried automatically. Renewal and input consume the alpha's bounded operation ledger. Screen-v1 cannot attach through the unchanged legacy browser; default raw PTYs remain compatible. Terminal recovery after daemon restart, mouse/focus/extended keyboard, complex Unicode fidelity and full TUI conformance are not promised. See [engine limits](../../docs/terminal-engine.md).
