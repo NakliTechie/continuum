@@ -7,3 +7,7 @@ coverage.out
 .env
 .env.*
 !.env.example
+
+# Worktree plan is a symlink to the canonical ignored directory.
+/plan
+.worktrees/
