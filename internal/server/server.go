@@ -97,6 +97,9 @@ func (e *sessionEntry) subscriber() *conn { e.subMu.Lock(); defer e.subMu.Unlock
 
 // Server holds relay-wide state shared across connections.
 type Server struct {
+	controlMu sync.Mutex // serializes input and takeover across both adapters
+	modern    *Modern
+
 	cfg   *config.Config
 	shims map[string]shims.Shim
 
@@ -121,6 +124,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) addSession(e *sessionEntry, id string) {
+	if s.modern != nil {
+		s.modern.recordBlock(id, e)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[id] = e
@@ -165,6 +171,7 @@ func (s *Server) getSession(id, token string) (*pty.Session, bool) {
 }
 
 func (s *Server) reissueToken(id, token string) {
+	s.record(id, "control_changed", map[string]any{"source": "takeover"})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.sessions[id]; e != nil {
@@ -328,6 +335,7 @@ func (s *Server) detach(cn *conn) {
 
 // deliverOutput routes a session's output to its current subscriber.
 func (s *Server) deliverOutput(id string, seq int, b []byte) {
+	s.record(id, "output", map[string]any{"encoding": "base64", "data": base64.StdEncoding.EncodeToString(b)})
 	e := s.entry(id)
 	if e == nil {
 		return
@@ -494,6 +502,7 @@ func noteEventStatus(e *sessionEntry, event string) {
 }
 
 func (s *Server) deliverEvent(id, event string, code *int) {
+	s.record(id, event, map[string]any{"exit_code": code})
 	e := s.entry(id)
 	if e == nil {
 		return
@@ -544,12 +553,22 @@ type conn struct {
 	ctx        context.Context
 	registered bool
 	writeMu    sync.Mutex
+	sink       func([]byte) error
 }
 
 func (cn *conn) send(v any) error {
 	cn.writeMu.Lock()
 	defer cn.writeMu.Unlock()
-	return wsjson.Write(cn.ctx, cn.ws, v)
+	if cn.sink != nil {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		return cn.sink(b)
+	}
+	ctx, cancel := context.WithTimeout(cn.ctx, 2*time.Second)
+	defer cancel()
+	return wsjson.Write(ctx, cn.ws, v)
 }
 
 func (cn *conn) sendError(sessionID, code, message string) {
@@ -560,7 +579,12 @@ func (cn *conn) sendError(sessionID, code, message string) {
 func (cn *conn) sendRaw(b []byte) error {
 	cn.writeMu.Lock()
 	defer cn.writeMu.Unlock()
-	return cn.ws.Write(cn.ctx, websocket.MessageText, b)
+	if cn.sink != nil {
+		return cn.sink(b)
+	}
+	ctx, cancel := context.WithTimeout(cn.ctx, 2*time.Second)
+	defer cancel()
+	return cn.ws.Write(ctx, websocket.MessageText, b)
 }
 
 func (cn *conn) serve() {
@@ -629,6 +653,8 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.sendError(env.SessionID, protocol.ErrAuthFailed, "register before sending "+env.Type)
 		return
 	}
+	cn.srv.controlMu.Lock()
+	defer cn.srv.controlMu.Unlock()
 	switch env.Type {
 	case protocol.TypeSpawn:
 		cn.handleSpawn(raw)
@@ -680,6 +706,13 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 }
 
 func (cn *conn) handleSpawn(raw json.RawMessage) {
+	if m := cn.srv.modern; m != nil {
+		blocks, err := m.Store.Blocks()
+		if err != nil || len(blocks) >= 1024 || m.degraded.Load() {
+			cn.sendError("", "resource_exhausted", "durable state unavailable or block limit reached")
+			return
+		}
+	}
 	var msg protocol.Spawn
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		cn.sendError("", "bad_message", "malformed spawn")
@@ -742,7 +775,7 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cmd = tmux.AttachCmd(tmuxName)
 	}
 
-	sess, err := pty.Start(id, msg.Agent, cmd)
+	sess, err := pty.Start(id, msg.Agent, cmd, s.cfg.CaptureDir)
 	if err != nil {
 		if tmuxName != "" {
 			_ = tmux.Kill(tmuxName)
@@ -803,9 +836,9 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	// argv, and never by silently starting an empty conversation instead.
 	var sess *acp.Session
 	if msg.ResumeAgentSession != "" {
-		sess, err = acp.Resume(id, msg.Agent, msg.Cwd, cmd, msg.ResumeAgentSession)
+		sess, err = acp.Resume(id, msg.Agent, msg.Cwd, cmd, msg.ResumeAgentSession, s.cfg.CaptureDir)
 	} else {
-		sess, err = acp.Start(id, msg.Agent, msg.Cwd, cmd)
+		sess, err = acp.Start(id, msg.Agent, msg.Cwd, cmd, s.cfg.CaptureDir)
 	}
 	if err != nil {
 		if errors.Is(err, acp.ErrLoadUnsupported) {
@@ -883,6 +916,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 // queueStructuredEvent routes a lifecycle event through the session's outbound
 // queue so it never overtakes the frames that caused it.
 func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *int) {
+	s.record(id, event, map[string]any{"exit_code": code})
 	noteEventStatus(e, event)
 	b, _ := json.Marshal(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
 	_, _ = e.trySend(b)
@@ -953,6 +987,7 @@ func turnUsageUpdate(sessionID string, usage json.RawMessage) json.RawMessage {
 // capture to the re-attach tail first, then queue for delivery; drop honestly
 // when a slow socket outruns the bound.
 func (s *Server) deliverStructured(id string, params json.RawMessage) {
+	s.record(id, "session_update", params)
 	e := s.entry(id)
 	if e == nil || e.acp == nil {
 		return
@@ -969,6 +1004,7 @@ func (s *Server) deliverStructured(id string, params json.RawMessage) {
 }
 
 func (s *Server) deliverPermissionRequest(id, requestID string, params json.RawMessage) {
+	s.record(id, "permission_request", map[string]any{"request_id": requestID, "acp": params})
 	e := s.entry(id)
 	if e == nil || e.acp == nil {
 		return
@@ -1291,7 +1327,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			_ = cn.send(protocol.ResumeFailed{Type: protocol.TypeResumeFailed, SessionID: msg.SessionID})
 			return
 		}
-		sess, err := pty.Start(msg.SessionID, e.agent, tmux.AttachCmd(e.tmuxName))
+		sess, err := pty.Start(msg.SessionID, e.agent, tmux.AttachCmd(e.tmuxName), cn.srv.cfg.CaptureDir)
 		if err != nil {
 			cn.sendError(msg.SessionID, protocol.ErrSpawnFailed, err.Error())
 			return

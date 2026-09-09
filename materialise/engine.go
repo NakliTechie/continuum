@@ -251,36 +251,40 @@ func (e *Engine) materialiseFile(f fleet.File, rec *workspace.Record, repoRoot s
 	if f.Template != "" {
 		b = []byte(interpolate(string(b), rec.Vars))
 	}
-	if err := e.FS.WriteFile(dest, b, 0o600); err != nil {
+	if err := e.FS.WriteFileWithin(rec.Path, f.To, b, 0o600); err != nil {
 		return Step{}, err
 	}
 	return Step{Stage: "files", Action: action, Detail: f.To}, nil
 }
 
-// runCommand honours cache_key: the command is skipped when the named file's
-// hash is unchanged since the last successful materialise in this repo. The
-// cache is keyed by repo and command, never by workspace — that is what turns a
-// three-minute install into a no-op on workspaces 2 through N.
+// runCommand caches successful execution within the same workspace and expanded
+// command. Workspace-local artifacts cannot be inferred from another worktree.
 func (e *Engine) runCommand(c fleet.Command, rec *workspace.Record, repoRoot string) (Step, error) {
 	line := interpolate(c.Run, rec.Vars)
 	step := Step{Stage: "commands", Action: "run", Detail: line}
+	if e.DryRun {
+		step.Skipped = true
+		step.Reason = "dry run"
+		return step, nil
+	}
+	hash := ""
 	if c.CacheKey != "" {
-		hash, err := e.hashFile(filepath.Join(repoRoot, c.CacheKey))
-		if err == nil {
-			hit, err := e.cacheHit(repoRoot, c.Run, hash)
-			if err == nil && hit {
-				step.Skipped, step.Reason = true, "cache_key "+c.CacheKey+" unchanged"
+		hash, _ = e.hashFile(filepath.Join(repoRoot, c.CacheKey))
+		if hash != "" {
+			if hit, err := e.cacheHit(rec.Path, line, hash); err == nil && hit {
+				step.Skipped = true
+				step.Reason = "cache_key " + c.CacheKey + " unchanged in this workspace"
 				return step, nil
 			}
-			defer func() { _ = e.cachePut(repoRoot, c.Run, hash) }()
 		}
-	}
-	if e.DryRun {
-		step.Skipped, step.Reason = true, "dry run"
-		return step, nil
 	}
 	if out, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), line, 30*time.Minute); err != nil {
 		return step, fmt.Errorf("%s: %w: %s", line, err, strings.TrimSpace(string(out)))
+	}
+	if hash != "" {
+		if err := e.cachePut(rec.Path, line, hash); err != nil {
+			return step, fmt.Errorf("recording command cache: %w", err)
+		}
 	}
 	return step, nil
 }

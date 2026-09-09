@@ -150,9 +150,8 @@ func TestThreeRunsConvergeWithNoDuplicateServices(t *testing.T) {
 	}
 }
 
-// The cache is keyed by repo and command, never by workspace — that is what
-// makes workspaces 2..N cheap.
-func TestCacheKeySkipsAcrossWorkspacesAndReRunsWhenTheKeyChanges(t *testing.T) {
+// Workspace-local setup runs once in each workspace; subsequent runs reuse it.
+func TestCacheKeyIsWorkspaceScopedAndReRunsWhenTheKeyChanges(t *testing.T) {
 	repo := testRepo(t)
 	e, ex, fsys := engineWithFakes(t, repo)
 	if _, err := e.Run(fullSpec(), repo, "w1"); err != nil {
@@ -161,15 +160,15 @@ func TestCacheKeySkipsAcrossWorkspacesAndReRunsWhenTheKeyChanges(t *testing.T) {
 	if _, err := e.Run(fullSpec(), repo, "w2"); err != nil {
 		t.Fatal(err)
 	}
-	if n := ex.Count("npm ci"); n != 1 {
-		t.Errorf("npm ci ran %d times across two workspaces, want 1", n)
+	if n := ex.Count("npm ci"); n != 2 {
+		t.Errorf("npm ci ran %d times across two workspaces, want 2", n)
 	}
 	fsys.Seed[filepath.Join(repo, "package-lock.json")] = []byte(`{"lockfileVersion":4}`)
 	if _, err := e.Run(fullSpec(), repo, "w3"); err != nil {
 		t.Fatal(err)
 	}
-	if n := ex.Count("npm ci"); n != 2 {
-		t.Errorf("npm ci ran %d times after the lockfile changed, want 2", n)
+	if n := ex.Count("npm ci"); n != 3 {
+		t.Errorf("npm ci ran %d times after the lockfile changed, want 3", n)
 	}
 }
 
@@ -247,7 +246,7 @@ func TestColdUnder90sAndWarmUnder10s(t *testing.T) {
 	}
 
 	start = time.Now()
-	if _, err := e.Run(spec, repo, "warm"); err != nil {
+	if _, err := e.Run(spec, repo, "cold"); err != nil {
 		t.Fatal(err)
 	}
 	warm := time.Since(start)

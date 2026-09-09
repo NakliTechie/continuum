@@ -47,3 +47,7 @@ For a future candidate runtime, build a compatible fake ACP helper and set absol
 The baseline runner verified all 42 hashes at Menagerie revision `837a3ee5fcf92c71a84dfefce062e6a9cf9a2457`, built disposable relay/fake-agent executables and passed all six Go integration tests on macOS (test-client race detector enabled). This includes PTY output emitted while every WebSocket client was disconnected and replayed after reconnect to the same PID. Linux, real provider agents, browser compatibility and the future Continuum runtime were not exercised.
 
 The initial run exposed a test-client encoding mistake: legacy input uses raw text, while output uses base64. Correcting the test client produced the passing run; no Menagerie implementation change was needed.
+
+## Candidate runtime validation — 2026-09-09
+
+All six unchanged black-box tests also passed against the Continuum-built candidate relay after the import and runtime corrections. `python3 scripts/verify.py verify legacy` now rebuilds that candidate in temporary storage. The upstream-baseline runner remains independent and pinned. A separate Chrome walk exercised the unchanged Menagerie app against the alpha daemon: add relay, spawn custom `/bin/cat`, send text and recover that output through the CLI. This does not establish every browser or mixed-version migration case.

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/NakliTechie/continuum/internal/pty"
@@ -119,8 +120,8 @@ var ErrLoadUnsupported = errors.New("agent does not support acp session/load")
 
 // Start spawns cmd (the agent's ACP server), completes the initialize +
 // session/new handshake, and returns the ready session.
-func Start(id, agent, cwd string, cmd *exec.Cmd) (*Session, error) {
-	return start(id, agent, cwd, cmd, "")
+func Start(id, agent, cwd string, cmd *exec.Cmd, capture ...*string) (*Session, error) {
+	return start(id, agent, cwd, cmd, "", capture...)
 }
 
 // Resume spawns cmd and reopens the agent's own past conversation through ACP
@@ -128,14 +129,14 @@ func Start(id, agent, cwd string, cmd *exec.Cmd) (*Session, error) {
 // rather than starting an empty one. It fails when the agent does not advertise
 // the loadSession capability — the caller must not silently fall back to a fresh
 // session, which the user would mistake for a resumed one.
-func Resume(id, agent, cwd string, cmd *exec.Cmd, acpSessionID string) (*Session, error) {
+func Resume(id, agent, cwd string, cmd *exec.Cmd, acpSessionID string, capture ...*string) (*Session, error) {
 	if acpSessionID == "" {
 		return nil, errors.New("acp resume: empty session id")
 	}
-	return start(id, agent, cwd, cmd, acpSessionID)
+	return start(id, agent, cwd, cmd, acpSessionID, capture...)
 }
 
-func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, error) {
+func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*string) (*Session, error) {
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -145,6 +146,10 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 		return nil, err
 	}
 	cmd.Stderr = os.Stderr
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -160,7 +165,12 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 		pending:   make(map[string]chan *Envelope),
 		perms:     make(map[string]*pendingPerm),
 	}
-	if dir, err := pty.SessionsDir(); err == nil {
+	dir, capErr := pty.SessionsDir()
+	if len(capture) > 0 && capture[0] != nil {
+		dir = *capture[0]
+		capErr = nil
+	}
+	if capErr == nil && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err == nil {
 			s.cap, _ = os.OpenFile(filepath.Join(dir, id+".acp.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		}
@@ -173,11 +183,11 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 		"clientCapabilities": map[string]any{"fs": map[string]any{"readTextFile": false, "writeTextFile": false}},
 	}, handshakeTimeout)
 	if err != nil {
-		s.Kill()
+		s.abortStart()
 		return nil, fmt.Errorf("acp initialize: %w", err)
 	}
 	if initResp.Error != nil {
-		s.Kill()
+		s.abortStart()
 		return nil, fmt.Errorf("acp initialize: %v", initResp.Error)
 	}
 	// The agent must say it can reload a session before we ask it to.
@@ -188,16 +198,16 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 			} `json:"agentCapabilities"`
 		}
 		if err := json.Unmarshal(initResp.Result, &initRes); err != nil || !initRes.AgentCapabilities.LoadSession {
-			s.Kill()
+			s.abortStart()
 			return nil, fmt.Errorf("%w (agent %s)", ErrLoadUnsupported, agent)
 		}
 		ld, err := s.request("session/load", map[string]any{"sessionId": resumeID, "cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
 		if err != nil {
-			s.Kill()
+			s.abortStart()
 			return nil, fmt.Errorf("acp session/load: %w", err)
 		}
 		if ld.Error != nil {
-			s.Kill()
+			s.abortStart()
 			return nil, fmt.Errorf("acp session/load: %v", ld.Error)
 		}
 		// The agent replays the conversation as session/update notifications
@@ -208,11 +218,11 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 	}
 	sn, err := s.request("session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
 	if err != nil {
-		s.Kill()
+		s.abortStart()
 		return nil, fmt.Errorf("acp session/new: %w", err)
 	}
 	if sn.Error != nil {
-		s.Kill()
+		s.abortStart()
 		return nil, fmt.Errorf("acp session/new: %v", sn.Error)
 	}
 	var snr struct {
@@ -220,7 +230,7 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string) (*Session, err
 		ConfigOptions json.RawMessage `json:"configOptions"`
 	}
 	if err := json.Unmarshal(sn.Result, &snr); err != nil || snr.SessionID == "" {
-		s.Kill()
+		s.abortStart()
 		return nil, fmt.Errorf("acp session/new: bad result %s", string(sn.Result))
 	}
 	s.ACPSessionID = snr.SessionID
@@ -298,10 +308,10 @@ func (s *Session) dispatch(env *Envelope) {
 			// Nobody is listening yet (session/load replay). Hold it.
 			s.pendingUpdates = append(s.pendingUpdates, b)
 		}
-		s.updateMu.Unlock()
 		if cb != nil {
 			cb(b)
 		}
+		s.updateMu.Unlock()
 	default:
 		// Unknown notification: already captured in the event log; ignore.
 	}
@@ -336,11 +346,21 @@ func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string)
 		s.mu.Unlock()
 		return fmt.Errorf("unknown permission request %q", requestID)
 	}
-	delete(s.perms, requestID)
 	optionID := explicitOptionID
 	if optionID == "" {
 		optionID = resolveOutcome(outcome, p.options)
 	}
+	valid := false
+	for _, option := range p.options {
+		if option.OptionID == optionID && optionID != "" {
+			valid = true
+		}
+	}
+	if !valid {
+		s.mu.Unlock()
+		return fmt.Errorf("no offered option for outcome %q", outcome)
+	}
+	delete(s.perms, requestID)
 	rpcID := append(json.RawMessage(nil), p.rpcID...)
 	s.mu.Unlock()
 
@@ -409,7 +429,7 @@ func (s *Session) SetOnUpdate(f func(params json.RawMessage)) {
 	s.onUpdate = f
 	held := s.pendingUpdates
 	s.pendingUpdates = nil
-	s.updateMu.Unlock()
+	defer s.updateMu.Unlock()
 	if f == nil {
 		return
 	}
@@ -422,12 +442,11 @@ func (s *Session) SetOnUpdate(f func(params json.RawMessage)) {
 func (s *Session) Kill() {
 	s.mu.Lock()
 	closed := s.closed
-	s.closed = true
 	s.mu.Unlock()
 	if closed || s.cmd.Process == nil {
 		return
 	}
-	_ = s.cmd.Process.Kill()
+	_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 }
 
 func (s *Session) closeFiles() {
@@ -516,6 +535,11 @@ func (s *Session) write(env Envelope) error {
 	s.logFrame("c>a", line)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if pipe, ok := s.stdin.(*os.File); ok {
+		if err := pipe.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			return err
+		}
+	}
 	if _, err := s.w.Write(append(line, '\n')); err != nil {
 		return err
 	}
@@ -547,3 +571,5 @@ func mustJSON(v any) json.RawMessage {
 	}
 	return b
 }
+
+func (s *Session) abortStart() { s.Kill(); _ = s.cmd.Wait(); s.closeFiles() }

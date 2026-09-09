@@ -1,6 +1,6 @@
 # One runtime, two products
 
-> **Lifecycle:** draft — recommended migration, 2026-09-09.
+> **Lifecycle:** living — runtimev1 imports the runtime with subtree history; installed-service cutover remains pending.
 
 The proposed answer to the owner's shared-binary question is yes: upgrade and extract the Go relay once, exposing two client contracts over one runtime. Do not fork the process manager into two repositories. Protocol reuse is possible now; safe simultaneous viewing and stronger durability require changes.
 
@@ -42,3 +42,7 @@ Menagerie: fleet grid/tree, structured diff review, attention UX, host connectio
 Continuum: general work sessions, CLI/agent contract, runtime implementation after extraction, transport/recovery experiments, future terminal/workspace clients.
 
 Neither project needs to own a hosted control plane. A static web client can use existing Cloudflare hosting; the host daemon itself needs real OS process facilities and is not a Cloudflare Worker workload.
+
+## Implemented branch state
+
+The local alpha now lives in the root Continuum Go module. The imported subtree merge retains Menagerie revision 837a3ee history and AGPL attribution. `legacy.Main` is the public compatibility launcher; `cmd/menagerie-relay` delegates to it. `cmd/continuum` exposes the modern CLI and legacy invocation. Both modern and legacy HTTP adapters share one `server.Server`. New recording uses its bbolt journal; legacy invocation retains the old file behavior. No installed configuration is automatically adopted. See README.md for the tested local flow and remaining migration limits.

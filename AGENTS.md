@@ -1,6 +1,6 @@
 # Continuum contributor guidance
 
-- Read README.md, SPEC.md, docs/shared-runtime.md, and local plan/ before implementation. This is currently a design scaffold; never imply an unimplemented command or guarantee exists.
+- Read README.md, SPEC.md, docs/shared-runtime.md, and local plan/ before implementation. The local alpha is implemented; SPEC.md still contains later release requirements. Never imply an unimplemented command or guarantee exists.
 - Keep runtime ownership singular. Do not copy Menagerie's relay into a permanent second implementation or cross Go internal-package boundaries. Preserve AGPL notices/history during extraction.
 - Protocol compatibility includes behavior, authority, and failure handling. Capability-gate new features; do not silently change legacy attach or approval semantics.
 - Keep source observations separate from design proposals. Record observed checks and remaining limits.

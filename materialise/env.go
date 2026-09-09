@@ -8,6 +8,7 @@
 package materialise
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -24,6 +26,7 @@ import (
 type FileSystem interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, b []byte, perm fs.FileMode) error
+	WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error
 	MkdirAll(path string, perm fs.FileMode) error
 	Stat(path string) (fs.FileInfo, error)
 }
@@ -72,22 +75,49 @@ func (ShellExecutor) Run(dir string, env []string, cmdline string, timeout time.
 	cmd := exec.Command("sh", "-c", cmdline)
 	cmd.Dir = dir
 	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = time.Second
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	if timeout <= 0 {
-		return cmd.CombinedOutput()
+		err := <-done
+		return output.Bytes(), err
 	}
-	done := make(chan struct{})
-	var out []byte
-	var err error
-	go func() { out, err = cmd.CombinedOutput(); close(done) }()
 	select {
-	case <-done:
-		return out, err
+	case err := <-done:
+		return output.Bytes(), err
 	case <-time.After(timeout):
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		return out, fmt.Errorf("timed out after %s", timeout)
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		return output.Bytes(), fmt.Errorf("timed out after %s", timeout)
 	}
+}
+
+func (OSFileSystem) WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err = r.MkdirAll(filepath.Dir(relative), 0755); err != nil {
+		return err
+	}
+	f, err := r.OpenFile(relative, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	ce := f.Close()
+	if err != nil {
+		return err
+	}
+	return ce
 }
 
 // interpolate replaces ${VAR} with the workspace's variable set. Unknown

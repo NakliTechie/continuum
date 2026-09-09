@@ -68,6 +68,9 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			return err
 		}
 		existing := rs.Workspaces[name]
+		if existing != nil && (filepath.Clean(existing.Repo) != filepath.Clean(repoRoot) || existing.Branch != branch || filepath.Clean(existing.Path) != filepath.Clean(path)) {
+			return fmt.Errorf("workspace %q already belongs to a different repository, branch or path", name)
+		}
 
 		// Ports already handed to live workspaces are off the table, so a second
 		// workspace never re-allocates the first one's port.

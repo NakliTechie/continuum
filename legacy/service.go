@@ -1,4 +1,4 @@
-package main
+package legacy
 
 import (
 	"fmt"
@@ -165,6 +165,7 @@ func installLaunchd(bin, logPath string) {
   <key>ProgramArguments</key>
   <array>
     <string>%s</string>
+    <string>legacy</string>
     <string>serve</string>
   </array>
   <key>RunAtLoad</key><true/>
@@ -206,7 +207,7 @@ Description=Menagerie relay
 After=network.target
 
 [Service]
-ExecStart="%s" serve
+ExecStart="%s" legacy serve
 Restart=always
 RestartSec=2
 

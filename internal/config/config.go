@@ -85,6 +85,8 @@ func (a Agent) ACPArgsOrDefault() []string {
 
 // Config mirrors relay.toml.
 type Config struct {
+	// CaptureDir is a programmatic override; nil retains legacy capture behavior.
+	CaptureDir        *string          `toml:"-"`
 	Name              string           `toml:"name"`
 	Listen            string           `toml:"listen"`
 	TLSCert           string           `toml:"tls_cert"`

@@ -3,6 +3,7 @@ package materialise
 import (
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -89,4 +90,8 @@ type FailProber struct{}
 
 func (FailProber) HTTP(url string, _ time.Duration) error {
 	return fmt.Errorf("probe failed (fake): %s", url)
+}
+
+func (f *RecordingFS) WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error {
+	return f.WriteFile(filepath.Join(root, relative), b, perm)
 }
