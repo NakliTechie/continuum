@@ -4,7 +4,7 @@
 
 ## 0. Agent contract — DRIVER pass completed 2026-09-09
 
-This pass applies ntkit DRIVER.md to the first spec draft. It defines design requirements, not shipped features. The remaining storage, packaging and sharing decisions stay explicitly open in walkthroughs.md.
+This pass applies ntkit DRIVER.md to the first spec draft. It defines design requirements, not shipped features. The implemented local subset and selected storage/control defaults are in docs/local-alpha.md. Broader packaging and remote-sharing decisions remain open in walkthroughs.md.
 
 ### 0.1 One perception act
 

@@ -13,6 +13,7 @@ package acp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,10 +89,13 @@ type Session struct {
 	// re-surfaces them to the browser through the session_update funnel.
 	InitConfig json.RawMessage
 
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	w     *bufio.Writer
-	cap   *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
+	stdout   *os.File
+	readDone chan struct{}
+	readErr  error // read only after readDone closes
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	w        *bufio.Writer
+	cap      *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
 
 	writeMu sync.Mutex
 	capMu   sync.Mutex // serializes event-log (s.cap) writes across reader + writer goroutines
@@ -121,7 +125,12 @@ var ErrLoadUnsupported = errors.New("agent does not support acp session/load")
 // Start spawns cmd (the agent's ACP server), completes the initialize +
 // session/new handshake, and returns the ready session.
 func Start(id, agent, cwd string, cmd *exec.Cmd, capture ...*string) (*Session, error) {
-	return start(id, agent, cwd, cmd, "", capture...)
+	return StartContext(context.Background(), id, agent, cwd, cmd, capture...)
+}
+
+// StartContext cancels startup only; the established process outlives this context.
+func StartContext(ctx context.Context, id, agent, cwd string, cmd *exec.Cmd, capture ...*string) (*Session, error) {
+	return start(ctx, id, agent, cwd, cmd, "", capture...)
 }
 
 // Resume spawns cmd and reopens the agent's own past conversation through ACP
@@ -130,29 +139,44 @@ func Start(id, agent, cwd string, cmd *exec.Cmd, capture ...*string) (*Session, 
 // the loadSession capability — the caller must not silently fall back to a fresh
 // session, which the user would mistake for a resumed one.
 func Resume(id, agent, cwd string, cmd *exec.Cmd, acpSessionID string, capture ...*string) (*Session, error) {
+	return ResumeContext(context.Background(), id, agent, cwd, cmd, acpSessionID, capture...)
+}
+
+// ResumeContext is Resume with cancellable startup.
+func ResumeContext(ctx context.Context, id, agent, cwd string, cmd *exec.Cmd, acpSessionID string, capture ...*string) (*Session, error) {
 	if acpSessionID == "" {
 		return nil, errors.New("acp resume: empty session id")
 	}
-	return start(id, agent, cwd, cmd, acpSessionID, capture...)
+	return start(ctx, id, agent, cwd, cmd, acpSessionID, capture...)
 }
 
-func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*string) (*Session, error) {
+func start(ctx context.Context, id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*string) (*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Own stdout: exec.Cmd.Wait must not close it before queued frames drain.
+	stdoutPipe, stdoutWriter, err := os.Pipe()
 	if err != nil {
+		stdinPipe.Close()
 		return nil, err
 	}
+	defer stdoutWriter.Close()
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = os.Stderr
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
 	if err := cmd.Start(); err != nil {
+		stdoutPipe.Close()
+		stdinPipe.Close()
 		return nil, err
 	}
+	stdoutWriter.Close()
 
 	s := &Session{
 		ID:        id,
@@ -160,6 +184,8 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*st
 		StartedAt: time.Now(),
 		PID:       cmd.Process.Pid,
 		cmd:       cmd,
+		stdout:    stdoutPipe,
+		readDone:  make(chan struct{}),
 		stdin:     stdinPipe,
 		w:         bufio.NewWriter(stdinPipe),
 		pending:   make(map[string]chan *Envelope),
@@ -178,7 +204,7 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*st
 
 	go s.readLoop(stdoutPipe)
 
-	initResp, err := s.request("initialize", map[string]any{
+	initResp, err := s.requestContext(ctx, "initialize", map[string]any{
 		"protocolVersion":    ProtocolVersion,
 		"clientCapabilities": map[string]any{"fs": map[string]any{"readTextFile": false, "writeTextFile": false}},
 	}, handshakeTimeout)
@@ -201,7 +227,7 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*st
 			s.abortStart()
 			return nil, fmt.Errorf("%w (agent %s)", ErrLoadUnsupported, agent)
 		}
-		ld, err := s.request("session/load", map[string]any{"sessionId": resumeID, "cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
+		ld, err := s.requestContext(ctx, "session/load", map[string]any{"sessionId": resumeID, "cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
 		if err != nil {
 			s.abortStart()
 			return nil, fmt.Errorf("acp session/load: %w", err)
@@ -216,7 +242,7 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*st
 		s.ACPSessionID = resumeID
 		return s, nil
 	}
-	sn, err := s.request("session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
+	sn, err := s.requestContext(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, handshakeTimeout)
 	if err != nil {
 		s.abortStart()
 		return nil, fmt.Errorf("acp session/new: %w", err)
@@ -246,6 +272,11 @@ func start(id, agent, cwd string, cmd *exec.Cmd, resumeID string, capture ...*st
 // contract minus output callbacks — run it in a goroutine.
 func (s *Session) Run(onExit func(code int)) {
 	err := s.cmd.Wait()
+	// The leader exiting ends its managed process group. Escaped descendants
+	// may retain stdout; bound that drain and surface any incomplete capture.
+	_ = syscall.Kill(-s.PID, syscall.SIGKILL)
+	_ = s.stdout.SetReadDeadline(time.Now().Add(2 * time.Second))
+	<-s.readDone
 	code := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -264,6 +295,7 @@ func (s *Session) Run(onExit func(code int)) {
 // still land in the event log first; interpretation never gates capture.
 func (s *Session) readLoop(r io.ReadCloser) {
 	defer r.Close()
+	defer close(s.readDone)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), maxLine)
 	for scanner.Scan() {
@@ -281,7 +313,11 @@ func (s *Session) readLoop(r io.ReadCloser) {
 		}
 		s.dispatch(&env)
 	}
+	s.readErr = scanner.Err()
 }
+
+// ReadError is valid after Run returns or from its exit callback.
+func (s *Session) ReadError() error { return s.readErr }
 
 func (s *Session) dispatch(env *Envelope) {
 	switch {
@@ -482,15 +518,28 @@ func (s *Session) closeFiles() {
 
 // request sends a request and waits for its response up to timeout.
 func (s *Session) request(method string, params any, timeout time.Duration) (*Envelope, error) {
+	return s.requestContext(context.Background(), method, params, timeout)
+}
+
+func (s *Session) requestContext(ctx context.Context, method string, params any, timeout time.Duration) (*Envelope, error) {
 	ch, cleanup, err := s.sendRequest(method, params)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.readDone:
+		return nil, errors.New("agent stdout closed during request")
 	case resp := <-ch:
+		if resp == nil {
+			return nil, errors.New("agent exited during request")
+		}
 		return resp, nil
-	case <-time.After(timeout):
-		cleanup()
+	case <-timer.C:
 		return nil, fmt.Errorf("%s: timed out after %s", method, timeout)
 	}
 }
@@ -572,4 +621,10 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-func (s *Session) abortStart() { s.Kill(); _ = s.cmd.Wait(); s.closeFiles() }
+func (s *Session) abortStart() {
+	s.Kill()
+	_ = s.cmd.Wait()
+	_ = s.stdout.Close()
+	<-s.readDone
+	s.closeFiles()
+}

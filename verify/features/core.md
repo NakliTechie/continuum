@@ -1,6 +1,6 @@
 # Core
 
-Exists: bbolt metadata/history, bounded replay with gaps, intent deduplication, observer/operator separation, expiring control and legacy takeover fencing, PTY process groups and bounded input. Inherited ACP and workspace commands retain their regression suites.
+Exists: bbolt metadata/history, bounded replay with gaps, intent deduplication, observer/operator separation, expiring control and legacy takeover fencing, PTY process groups and bounded input. ACP startup cancellation, final-frame drain, and shutdown admission have fake-process regressions. Inherited ACP and workspace commands retain their regression suites.
 
 Reach: HTTP `POST /v1` or the same operations through the CLI; legacy WS uses `/`.
 

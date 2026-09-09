@@ -2,7 +2,7 @@
 
 > Lifecycle: locked for implementation, 2026-09-09. Engineering choices under the owner’s instruction to build; broader first-release gates remain in SPEC.md.
 
-One canonical runtime source is being transferred with history into Continuum on runtimev1. Menagerie migration is prepared separately; installed services and main branches are not cut over by these changes.
+The runtime was imported with source history into Continuum on runtimev1. Public Menagerie source cutover is gated on a public shared-runtime distribution (docs/menagerie-adapter.md). Menagerie migration is prepared separately; installed services and main branches are not cut over by these changes.
 
 The first slice runs a single loopback server per private state directory, with legacy WebSocket and modern authenticated HTTP adapters over the same process registry. The modern CLI can open a PTY, inspect sessions, page/stream recorded events, claim/release/take over control, send input, resize, and stop. Observers never attach through the legacy takeover operation. Modern leases last 60 seconds; a fresh acquisition/takeover fences prior leases, including legacy token rotation. Authority is personal-host operator access in this alpha, not grants for untrusted users.
 
@@ -13,3 +13,5 @@ New captures use the explicit private state directory, not the installed Menager
 Each mutation has a caller-supplied request ID, stored with a request digest before effects. Repeated IDs return the saved result; mismatched payloads conflict; unresolved intents return indeterminate after a crash, never silently repeat a launch. Token-bearing control results are not journaled; an uncertain acquire requires a new explicit takeover. Input completion confirms the write, not execution of the command.
 
 Acceptance: same process observed by two clients without takeover; no-client output replay; explicit takeover fences old input including legacy attach; restart recovers records with interrupted status; duplicate/conflicting intents; bounded replay with gaps; database lock and incompatible schema refusal; auth rejection; real CLI first-run and actionable errors. Remote hosts, native GUI, tmux continuation, real ACP provider validation and full release packaging remain separate gates.
+
+ACP startup cancellation does not bind established processes to a browser connection. Shutdown cancels pending handshakes and stops managed process groups. ACP exit is recorded after its stdout reader drains; an abnormal read failure marks capture degraded. The two-second post-exit pipe-read deadline bounds descendants that retain stdout, rather than declaring missing frames complete.

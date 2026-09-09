@@ -61,6 +61,10 @@ func main() {
 		method, _ := m["method"].(string)
 		switch method {
 		case "initialize":
+			if marker := os.Getenv("FAKE_STALL_INITIALIZE"); marker != "" {
+				_ = os.WriteFile(marker, []byte("started"), 0600)
+				time.Sleep(30 * time.Second)
+			}
 			reply(id, msg{
 				"protocolVersion": 1,
 				"agentInfo":       msg{"name": "fakeagent", "title": "Fake Agent", "version": "0.0.1"},

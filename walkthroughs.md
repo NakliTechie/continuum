@@ -1,28 +1,28 @@
 # Continuum — scope walkthroughs
 
-> **Lifecycle:** draft — recommended defaults are written into SPEC.md; scope choices remain open for refinement, not blockers to this scaffold.
+> **Lifecycle:** local-alpha defaults selected for implementation on 2026-09-09 under the instruction to build. Broader remote and release choices remain open. See [local alpha contract](docs/local-alpha.md).
 
 ## Question 1 — Where does the shared runtime live?
 
-> **Status:** 🟡 OPEN — recommend staged extraction into Continuum after compatibility tests.
+> **Status:** SELECTED — history-preserving import into Continuum implemented; public Menagerie source cutover waits for a public shared runtime distribution. See [adapter boundary](docs/menagerie-adapter.md).
 
 Options: leave all shared runtime code in Menagerie permanently; extract once into Continuum; or create a third neutral repository. Recommend extraction into Continuum: clear broader ownership with two products consuming one version. Give up permanent independence of release planning. Revisit a neutral repo only when another independent consumer requires it. Preserve source history, notices, module boundaries, and one canonical implementation.
 
 ## Question 2 — What survives a restart?
 
-> **Status:** 🟡 OPEN — recommend durable records/events/waits with explicitly separate process guarantees.
+> **Status:** SELECTED FOR ALPHA — client disconnects preserve processes; daemon restarts preserve records and retained events, with interrupted process state. Durable waits and transparent upgrades remain later work.
 
 Options: promise only client-disconnect survival; persist work records and use tmux/agent-load where available; build a separate process-host service immediately. Recommend the middle option initially. It adds useful recovery without pretending an ACP process or a rebooted machine can continue unchanged. Revisit a separate process host when transparent runtime upgrades are required and measured tests show tmux/agent-load insufficient.
 
 ## Question 3 — How do several people share control?
 
-> **Status:** 🟡 OPEN — recommend multiple observers and one fenced controller per block.
+> **Status:** SELECTED FOR ALPHA — independent observers and one 60-second controller lease; explicit takeover fences prior control. Browser attach remains the trusted legacy takeover adapter. Remote sharing remains open.
 
 Options: current takeover-only attachment; observers plus leased control; simultaneous input. Recommend observers plus leased control to avoid competing keystrokes, resize fights, and approval races. Give up simultaneous typing initially. Revisit collaborative editing/input only with a concrete workflow requiring it. Decide lease expiry and takeover UX before implementing remote sharing.
 
 ## Question 4 — How much history is retained?
 
-> **Status:** 🟡 OPEN — recommend explicit capture policy and bounded retention with typed gaps.
+> **Status:** SELECTED FOR ALPHA — default content recording, bbolt/fsync, 4096 events/8 MiB logical retention, explicit gaps and incomplete-history signals. Physical database size may exceed retained payloads. Per-session exclusion, purge and compaction remain later work.
 
 Options: unlimited automatic capture; opt-in content capture; bounded default capture with per-session exclusion. Select the default and exact disk/time limits before the first persistent runtime release. Preserve metadata without assuming content capture. Terminal output can contain credentials; do not describe redaction as complete protection. Choose storage driver and fsync/ack contract with crash tests.
 

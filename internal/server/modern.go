@@ -101,8 +101,16 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(m.read(q))
 		return
 	}
+	if q.Operation == "open" {
+		m.s.spawnMu.Lock()
+		defer m.s.spawnMu.Unlock()
+	}
 	m.s.controlMu.Lock()
 	defer m.s.controlMu.Unlock()
+	if m.s.closing.Load() {
+		reply(api.Error(q.RequestID, "unreachable", "shutdown", "daemon is stopping", "status"))
+		return
+	}
 	reply(m.mutate(q))
 }
 func (m *Modern) read(q api.Request) api.Response {
@@ -294,8 +302,24 @@ func (m *Modern) effect(q api.Request) api.Response {
 	return api.Result(q.RequestID, map[string]any{"accepted": true})
 }
 
+// BeginShutdown cancels pending handshakes and closes hijacked WebSockets,
+// which net/http.Shutdown does not own. Established processes stop in StopAll.
+func (s *Server) BeginShutdown() {
+	s.closing.Store(true)
+	s.cancel()
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	for cn, cancel := range s.conns {
+		cancel()
+		_ = cn.ws.CloseNow()
+	}
+}
+
 // StopAll is used only for the foreground alpha daemon's explicit shutdown.
 func (s *Server) StopAll() {
+	s.BeginShutdown()
+	s.spawnMu.Lock()
+	defer s.spawnMu.Unlock()
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	for _, b := range s.listSessions() {

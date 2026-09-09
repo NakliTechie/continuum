@@ -76,7 +76,7 @@ Point Menagerie's manual Add relay form at `ws://` plus the address printed by `
 
 Menagerie's existing browser still uses trusted legacy takeover behavior. A Continuum observer does not steal its token, but an explicit browser reattach fences modern control. A legacy browser may need reconnecting to discover sessions opened elsewhere. Browser folder storage and daemon history are separate; skipping browser storage does not disable daemon capture.
 
-The same executable supports `continuum legacy serve`, `legacy agents`, `legacy token`, `legacy service` and `legacy materialise`; those commands retain Menagerie's existing configuration and semantics. They do not start automatically. The `menagerie-relay` entry point is a thin wrapper over the same module. An installation cutover remains a separately validated operation.
+The same executable supports `continuum legacy serve`, `legacy agents`, `legacy token`, `legacy service` and `legacy materialise`; those commands retain Menagerie's existing configuration and semantics. They do not start automatically. The `menagerie-relay` entry point is a thin wrapper over the same module. An installation cutover remains a separately validated operation. See the [public/private source adapter boundary](docs/menagerie-adapter.md).
 
 ### Verify
 

@@ -420,6 +420,7 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	srv.BeginShutdown()
 	_ = h.Shutdown(shutdown)
 	srv.StopAll()
 	if err := srv.Drain(shutdown); err != nil {

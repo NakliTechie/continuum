@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -98,6 +99,12 @@ func (e *sessionEntry) subscriber() *conn { e.subMu.Lock(); defer e.subMu.Unlock
 // Server holds relay-wide state shared across connections.
 type Server struct {
 	controlMu sync.Mutex // serializes input and takeover across both adapters
+	spawnMu   sync.Mutex // serialize admission without blocking unrelated control
+	closing   atomic.Bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	connMu    sync.Mutex
+	conns     map[*conn]context.CancelFunc
 	modern    *Modern
 
 	cfg   *config.Config
@@ -109,7 +116,9 @@ type Server struct {
 
 // New builds a Server for the given config.
 func New(cfg *config.Config) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
+		ctx: ctx, cancel: cancel, conns: make(map[*conn]context.CancelFunc),
 		cfg:      cfg,
 		shims:    shims.NewRegistry(cfg.AgentCommands()),
 		sessions: make(map[string]*sessionEntry),
@@ -539,7 +548,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.CloseNow()
 
-	cn := &conn{srv: s, ws: c, ctx: r.Context()}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	cn := &conn{srv: s, ws: c, ctx: ctx}
+	s.connMu.Lock()
+	if s.closing.Load() {
+		s.connMu.Unlock()
+		return
+	}
+	s.conns[cn] = cancel
+	s.connMu.Unlock()
+	defer func() { s.connMu.Lock(); delete(s.conns, cn); s.connMu.Unlock() }()
 	cn.serve()
 	s.detach(cn)
 }
@@ -653,11 +672,21 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.sendError(env.SessionID, protocol.ErrAuthFailed, "register before sending "+env.Type)
 		return
 	}
+	if env.Type == protocol.TypeSpawn {
+		cn.srv.spawnMu.Lock()
+		defer cn.srv.spawnMu.Unlock()
+		if cn.srv.closing.Load() {
+			return
+		}
+		cn.handleSpawn(raw)
+		return
+	}
 	cn.srv.controlMu.Lock()
 	defer cn.srv.controlMu.Unlock()
+	if cn.srv.closing.Load() {
+		return
+	}
 	switch env.Type {
-	case protocol.TypeSpawn:
-		cn.handleSpawn(raw)
 	case protocol.TypeAttach:
 		cn.handleAttach(raw)
 	case protocol.TypeSeen:
@@ -836,9 +865,9 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	// argv, and never by silently starting an empty conversation instead.
 	var sess *acp.Session
 	if msg.ResumeAgentSession != "" {
-		sess, err = acp.Resume(id, msg.Agent, msg.Cwd, cmd, msg.ResumeAgentSession, s.cfg.CaptureDir)
+		sess, err = acp.ResumeContext(s.ctx, id, msg.Agent, msg.Cwd, cmd, msg.ResumeAgentSession, s.cfg.CaptureDir)
 	} else {
-		sess, err = acp.Start(id, msg.Agent, msg.Cwd, cmd, s.cfg.CaptureDir)
+		sess, err = acp.StartContext(s.ctx, id, msg.Agent, msg.Cwd, cmd, s.cfg.CaptureDir)
 	}
 	if err != nil {
 		if errors.Is(err, acp.ErrLoadUnsupported) {
@@ -904,6 +933,9 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 
 	go func() {
 		sess.Run(func(code int) {
+			if sess.ReadError() != nil && s.modern != nil {
+				s.modern.degraded.Store(true)
+			}
 			c := code
 			s.queueStructuredEvent(e, id, protocol.EventExited, &c)
 			s.removeSession(id)
