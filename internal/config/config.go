@@ -85,6 +85,9 @@ func (a Agent) ACPArgsOrDefault() []string {
 
 // Config mirrors relay.toml.
 type Config struct {
+	// sourcePath is immutable after Load; only registration authority reloads.
+	sourcePath string
+
 	// CaptureDir is a programmatic override; nil retains legacy capture behavior.
 	CaptureDir        *string          `toml:"-"`
 	Name              string           `toml:"name"`
@@ -217,11 +220,32 @@ func isLoopbackOrigin(origin string) bool {
 
 // Load reads a config from path.
 func Load(path string) (*Config, error) {
-	var c Config
-	if _, err := toml.DecodeFile(path, &c); err != nil {
+	abs, err := filepath.Abs(path)
+	if err != nil {
 		return nil, err
 	}
+	var c Config
+	if _, err := toml.DecodeFile(abs, &c); err != nil {
+		return nil, err
+	}
+	c.sourcePath = abs
 	return &c, nil
+}
+
+// CurrentRegistrationToken reads current registration authority for a loaded
+// legacy config. Read/decode failures are errors, never a fallback to a revoked
+// startup token. Programmatic modern/test configs retain their explicit token.
+func (c *Config) CurrentRegistrationToken() (string, error) {
+	if c.sourcePath == "" {
+		return c.RegistrationToken, nil
+	}
+	var current struct {
+		RegistrationToken string `toml:"registration_token"`
+	}
+	if _, err := toml.DecodeFile(c.sourcePath, &current); err != nil {
+		return "", err
+	}
+	return current.RegistrationToken, nil
 }
 
 // Save writes a config to path, creating the parent dir with 0700 and the file
@@ -230,12 +254,23 @@ func Save(path string, c *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Readers must see either complete config, never a truncated rotation write.
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
 	}
+	defer os.Remove(f.Name())
 	defer f.Close()
-	return toml.NewEncoder(f).Encode(c)
+	if err := toml.NewEncoder(f).Encode(c); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // Exists reports whether a config file is present at path.

@@ -51,3 +51,7 @@ The initial run exposed a test-client encoding mistake: legacy input uses raw te
 ## Candidate runtime validation — 2026-09-09
 
 All six unchanged black-box tests also passed against the Continuum-built candidate relay after the import and runtime corrections. `python3 scripts/verify.py verify legacy` now rebuilds that candidate in temporary storage. The upstream-baseline runner remains independent and pinned. A separate Chrome walk exercised the unchanged Menagerie app against the alpha daemon: add relay, spawn custom `/bin/cat`, send text and recover that output through the CLI. This does not establish every browser or mixed-version migration case.
+
+## Registration rotation
+
+A legacy server loaded from relay.toml reads current registration authority before registration and each subsequent command/output. `legacy token rotate` atomically replaces that private config. Old credentials fail on new connections; existing connections close before their next command or output. Idle connections need no polling timer. Rotation does not kill processes or adopt/restart services. Missing, malformed or empty credential configuration fails closed. Other config fields still require the existing restart workflow. Programmatically configured modern daemons keep their separate private-state credentials.

@@ -195,7 +195,7 @@ func cmdToken(path string, args []string) {
 		if err := config.Save(path, cfg); err != nil {
 			fatal(err)
 		}
-		fmt.Println("Registration token rotated. Clients must re-register. New token:")
+		fmt.Println("Registration token rotated. Running relays revoke old connections before their next command or output. Processes keep running; clients must re-register. New token:")
 		fmt.Printf("  %s\n", tok)
 	default:
 		fatalf("usage: menagerie-relay token [print|rotate]")

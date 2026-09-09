@@ -577,13 +577,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 // send(), which serializes them (session output goroutines write concurrently
 // with the read loop, and a connection can subscribe to multiple sessions).
 type conn struct {
-	terminal   *pty.TerminalOptions // modern spawn only; never set from legacy JSON
-	srv        *Server
-	ws         *websocket.Conn
-	ctx        context.Context
-	registered bool
-	writeMu    sync.Mutex
-	sink       func([]byte) error
+	terminal          *pty.TerminalOptions // modern spawn only; never set from legacy JSON
+	srv               *Server
+	ws                *websocket.Conn
+	ctx               context.Context
+	registered        bool
+	registrationToken string // guarded by writeMu; registration generation for this connection
+	writeMu           sync.Mutex
+	sink              func([]byte) error
 }
 
 func (cn *conn) send(v any) error {
@@ -596,9 +597,34 @@ func (cn *conn) send(v any) error {
 		}
 		return cn.sink(b)
 	}
+	if !cn.registrationCurrentLocked() {
+		_ = cn.ws.CloseNow()
+		return errors.New("registration credential revoked")
+	}
 	ctx, cancel := context.WithTimeout(cn.ctx, 2*time.Second)
 	defer cancel()
 	return wsjson.Write(ctx, cn.ws, v)
+}
+
+// registrationCurrentLocked applies rotation before an existing connection's
+// next command or output. Idle processes survive; revoked viewers must register
+// again with current authority. writeMu guards this connection's credential.
+func (cn *conn) registrationCurrentLocked() bool {
+	if cn.registrationToken == "" {
+		return true
+	}
+	want, err := cn.srv.cfg.CurrentRegistrationToken()
+	return err == nil && want != "" && subtle.ConstantTimeCompare([]byte(cn.registrationToken), []byte(want)) == 1
+}
+
+func (cn *conn) checkRegistration() bool {
+	cn.writeMu.Lock()
+	current := cn.registrationCurrentLocked()
+	cn.writeMu.Unlock()
+	if !current {
+		_ = cn.ws.CloseNow()
+	}
+	return current
 }
 
 func (cn *conn) sendError(sessionID, code, message string) {
@@ -611,6 +637,10 @@ func (cn *conn) sendRaw(b []byte) error {
 	defer cn.writeMu.Unlock()
 	if cn.sink != nil {
 		return cn.sink(b)
+	}
+	if !cn.registrationCurrentLocked() {
+		_ = cn.ws.CloseNow()
+		return errors.New("registration credential revoked")
 	}
 	ctx, cancel := context.WithTimeout(cn.ctx, 2*time.Second)
 	defer cancel()
@@ -686,7 +716,7 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 	if env.Type == protocol.TypeSpawn {
 		cn.srv.spawnMu.Lock()
 		defer cn.srv.spawnMu.Unlock()
-		if cn.srv.closing.Load() {
+		if cn.srv.closing.Load() || !cn.checkRegistration() {
 			return
 		}
 		cn.handleSpawn(raw)
@@ -694,7 +724,7 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 	}
 	cn.srv.controlMu.Lock()
 	defer cn.srv.controlMu.Unlock()
-	if cn.srv.closing.Load() {
+	if cn.srv.closing.Load() || !cn.checkRegistration() {
 		return
 	}
 	switch env.Type {
@@ -730,13 +760,16 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 		cn.sendError("", "bad_message", "malformed register")
 		return
 	}
-	want := cn.srv.cfg.RegistrationToken
-	if want == "" || subtle.ConstantTimeCompare([]byte(msg.RegistrationToken), []byte(want)) != 1 {
+	want, tokenErr := cn.srv.cfg.CurrentRegistrationToken()
+	if tokenErr != nil || want == "" || subtle.ConstantTimeCompare([]byte(msg.RegistrationToken), []byte(want)) != 1 {
 		cn.sendError("", protocol.ErrAuthFailed, "registration token rejected")
 		_ = cn.ws.Close(websocket.StatusPolicyViolation, "auth_failed")
 		return
 	}
+	cn.writeMu.Lock()
+	cn.registrationToken = want
 	cn.registered = true
+	cn.writeMu.Unlock()
 	_ = cn.send(protocol.Registered{Type: protocol.TypeRegistered})
 	// Re-adopt any tmux-backed agents that outlived a relay restart, then advertise
 	// all live sessions so the client re-attaches (1.1).
