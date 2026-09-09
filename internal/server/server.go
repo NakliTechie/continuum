@@ -51,6 +51,10 @@ type sessionEntry struct {
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
+	// oob overrides where an out-of-band frame is written. Nil in production,
+	// where the subscriber connection is used; a test substitutes one rather
+	// than standing up a WebSocket.
+	oob rawSender
 
 	// Lifecycle status the relay believes this session is in. Until now status
 	// lived only in the client (the relay just emitted events); `wait` has to
@@ -75,7 +79,11 @@ type sessionEntry struct {
 	seq     int64       // monotonic across session_update/permission_request frames
 	tail    [][]byte    // recently delivered frames, replayed on re-attach (capped)
 	dropped int         // frames dropped since the last marker was queued
-	closed  bool        // outbox closed; sending after this panics, so every send checks it
+	// dropNotified is set while a backpressure episode is being reported, so the
+	// client gets one marker per episode instead of one per lost frame. Cleared
+	// as soon as a frame gets through again.
+	dropNotified bool
+	closed       bool // outbox closed; sending after this panics, so every send checks it
 
 	// Latest instrument frames (config selectors + last turn's token usage),
 	// kept outside the tail ring so a long session still restores them on
@@ -976,12 +984,52 @@ func (s *Server) deliverPermissionRequest(id, requestID string, params json.RawM
 	}
 }
 
+// rawSender is the one thing dropStructured needs from a subscriber: a single
+// serialized write that does not go through the outbox.
+type rawSender interface {
+	sendRaw(b []byte) error
+}
+
+// dropStructured counts a frame lost to backpressure and tells the client, once
+// per episode.
+//
+// The marker CANNOT go through the outbox: the outbox is full by definition at
+// the moment a drop happens, so queuing the marker there means it is dropped
+// exactly when it is needed. A 2026-09-09 live check measured that — 5000 turns,
+// ~20 000 frames produced, 3177 received, zero markers delivered. So the marker
+// is written out-of-band, straight to the subscriber's serialized writer, which
+// is why it can overtake frames still queued ahead of it: it is a control signal
+// about the queue, not a member of it.
+//
+// One marker per episode, not per dropped frame. A client that is already too
+// slow to drain the queue must not be handed thousands of extra frames telling
+// it so; the flag clears as soon as a normal frame gets through again, so a
+// later episode is reported afresh.
 func (s *Server) dropStructured(e *sessionEntry, id string) {
 	e.outMu.Lock()
 	e.dropped++
 	n := e.dropped
+	notify := !e.dropNotified
+	e.dropNotified = true
 	e.outMu.Unlock()
+	if !notify {
+		return
+	}
 	marker, _ := json.Marshal(protocol.NewError(id, "frames_dropped", fmt.Sprintf("%d structured frame(s) dropped by backpressure", n)))
+
+	var w rawSender
+	if e.oob != nil {
+		w = e.oob
+	} else if sub := e.subscriber(); sub != nil {
+		w = sub
+	}
+	if w != nil {
+		if err := w.sendRaw(marker); err == nil {
+			return
+		}
+	}
+	// No subscriber, or the direct write failed: fall back to the queue, which is
+	// where the marker used to live. Best-effort by construction.
 	_, _ = e.trySend(marker)
 }
 
@@ -997,6 +1045,9 @@ func (e *sessionEntry) trySend(b []byte) (sent, closed bool) {
 	}
 	select {
 	case e.outbox <- b:
+		// A frame got through, so the backpressure episode is over: the next drop
+		// is a new episode and earns its own marker.
+		e.dropNotified = false
 		return true, false
 	default:
 		return false, false
