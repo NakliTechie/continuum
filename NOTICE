@@ -1,0 +1,4 @@
+Continuum includes the Menagerie Go relay by NakliTechie and contributors,
+licensed under AGPL-3.0. Original source: https://github.com/NakliTechie/menagerie
+Pinned revision: 837a3ee5fcf92c71a84dfefce062e6a9cf9a2457.
+The relay-go subtree history is retained as a merge parent (split 6e4c56aa432eae1a20cf6894481622b2693fec4f).

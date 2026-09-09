@@ -1,0 +1,13 @@
+# dry run: nakliOS-parallel (menagerie.fleet.v1)
+# workspace w1 on branch agent/w1
+ports     allocate  PORT=4000
+ports     allocate  DB_PORT=5500
+files     copy      .env.local   [skipped: dry run]
+files     render    .env   [skipped: dry run]
+commands  run       npm ci --prefer-offline   [skipped: dry run]
+commands  run       npm run db:seed   [skipped: dry run]
+services  start     postgres   [skipped: dry run]
+health    http      http://localhost:4000/healthz   [skipped: dry run]
+health    command   npm run typecheck   [skipped: dry run]
+escape    run       ./.menagerie/bootstrap.sh   [skipped: dry run]
+# would end in state: ready

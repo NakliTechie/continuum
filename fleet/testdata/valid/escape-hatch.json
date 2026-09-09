@@ -1,0 +1,19 @@
+{
+  "spec": "menagerie.fleet.v1",
+  "name": "escape-only",
+  "repo": ".",
+  "topology": "supervisor",
+  "workspace": {
+    "isolation": "worktree",
+    "materialise": {
+      "escape": "./.menagerie/bootstrap.sh"
+    }
+  },
+  "roster": [
+    {
+      "role": "worker",
+      "agent": "opencode",
+      "count": 2
+    }
+  ]
+}
