@@ -1,18 +1,34 @@
 // Asserts the client's fleet validator agrees with the Go one on every fixture.
 // D6 says one ingress; two implementations of one ingress only stay one if a
-// gate proves they refuse the same documents. Run: node relay-go/fleet/mirror-check.mjs
+// gate proves they refuse the same documents. Run from any directory:
+// node /path/to/continuum/fleet/mirror-check.mjs --client-html /path/to/menagerie/index.html
 import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repo = join(here, "..", "..");
-
-const html = readFileSync(join(repo, "index.html"), "utf8");
+const repo = join(here, "..");
+const args = process.argv.slice(2);
+const usage = "Usage: node fleet/mirror-check.mjs --client-html /absolute/path/to/menagerie/index.html";
+if (args.length === 1 && ["--help", "-h"].includes(args[0])) {
+  console.log(usage);
+  process.exit(0);
+}
+if (args.length !== 2 || args[0] !== "--client-html" || !args[1]) {
+  console.error(usage);
+  process.exit(2);
+}
+let html;
+try {
+  html = readFileSync(resolve(args[1]), "utf8");
+} catch (error) {
+  console.error(`mirror-check: cannot read client HTML: ${error.message}`);
+  process.exit(2);
+}
 const start = html.indexOf("// --- fleet-validate:start ---");
 const end = html.indexOf("// --- fleet-validate:end ---");
-if (start < 0 || end < 0) {
+if (start < 0 || end <= start) {
   console.error("mirror-check: the fleet-validate markers are missing from index.html");
   process.exit(1);
 }
@@ -21,7 +37,7 @@ const fleetValidateText = new Function(src + "\nreturn fleetValidateText;")();
 
 // The Go side prints one JSON array of issues per fixture, keyed by path.
 const goOut = execFileSync("go", ["run", "./fleet/cmd/fleetcheck", "-json", "./fleet/testdata"], {
-  cwd: join(repo, "relay-go"), encoding: "utf8",
+  cwd: repo, encoding: "utf8",
 });
 const go = JSON.parse(goOut);
 
@@ -31,7 +47,11 @@ for (const dir of ["valid", "invalid", "secrets", "normalises"]) {
     const key = `${dir}/${name}`;
     const text = readFileSync(join(here, "testdata", dir, name), "utf8");
     const jsIssues = fleetValidateText(text);
-    const goIssues = go[key] ?? [];
+    if (!Object.hasOwn(go, key) || !Array.isArray(go[key])) {
+      console.error(`mirror-check: Go verifier omitted or malformed fixture ${key}`);
+      process.exit(1);
+    }
+    const goIssues = go[key];
     // path AND code, undeduplicated: comparing a deduplicated set of paths made a
     // differing `code` — and a differing count at one path — invisible to the very
     // gate D6 cites as the reason a rule cannot drift between the two ingresses.
