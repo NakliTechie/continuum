@@ -126,7 +126,12 @@ func Default() (*Config, error) {
 		// sandboxed iframe, so allowing it would let any website pass the gate.
 		// Add "null" (or a "http://localhost:PORT" dev origin) by hand only when
 		// doing local file:// development.
-		AllowedOrigins: []string{"https://menagerie.naklitechie.com"},
+		//
+		// Two origins by default: the canonical site, and NakliOS, which serves a
+		// same-origin mirror of the app at naklios.dev/apps/menagerie/ — inside it
+		// the page's Origin is https://naklios.dev (docs/naklios.md). A relay from
+		// before this default needs the second entry added to relay.toml by hand.
+		AllowedOrigins: []string{"https://menagerie.naklitechie.com", "https://naklios.dev"},
 		// Only the shim that needs no binary is written out. The rest of the
 		// agent list is detected on PATH at startup from KnownAgents, so the
 		// browser's dropdown lists what this machine can actually spawn. Pin an

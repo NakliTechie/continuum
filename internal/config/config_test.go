@@ -39,6 +39,27 @@ func TestOriginAllowed(t *testing.T) {
 	}
 }
 
+// The default allowlist must admit both places the app is served from: its own
+// site, and the same-origin mirror NakliOS hosts. Dropping either silently breaks
+// one of the two front doors with a 403 that the browser reports as a bare
+// WebSocket close.
+func TestDefaultOriginsAdmitBothFrontDoors(t *testing.T) {
+	c, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []string{"https://menagerie.naklitechie.com", "https://naklios.dev"} {
+		if !c.OriginAllowed(o) {
+			t.Errorf("default allowlist rejects %q", o)
+		}
+	}
+	for _, bad := range []string{"null", "https://evil.example", "http://naklios.dev", "https://naklios.dev.evil.example"} {
+		if c.OriginAllowed(bad) {
+			t.Errorf("default allowlist admits %q", bad)
+		}
+	}
+}
+
 func TestOriginAllowedLocalhost(t *testing.T) {
 	// A loopback-bound relay auto-allows localhost / 127.0.0.1 / [::1] origins…
 	lo := &Config{Listen: "127.0.0.1:7878", AllowedOrigins: []string{"https://menagerie.naklitechie.com"}}
