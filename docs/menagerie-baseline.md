@@ -33,3 +33,7 @@ Known workspace defects recorded in Menagerie's pending file include unconstrain
 In the immediately preceding comparison, `go test ./...` passed after permitting local test sockets; `node protocol/validate-fixtures.mjs` passed 29 fixtures with 23/23 frame types. The real ACP integration suite uses the `acpintegration` build tag and was not run. No new browser end-to-end run or latency benchmark was performed.
 
 The local two-relay report records an earlier EC2 any/all wait exercise. Treat that as prior evidence, not a fresh deployment or proof of restart durability. No external infrastructure was created for this scaffold.
+
+## Machine-readable pin
+
+[compatibility-baseline.json](compatibility-baseline.json) records the pinned revision and SHA-256 hashes of the runtime, protocol definitions, behavioral test sources, and fixture files. Generated from immutable Git objects; JSONL fixture syntax was checked. These hashes detect drift; they do not replace behavioral conformance tests.

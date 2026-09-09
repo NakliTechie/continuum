@@ -1,0 +1,222 @@
+{
+  "schema": "continuum.compatibility-baseline.v1",
+  "captured_date": "2026-09-09",
+  "source_repository": "https://github.com/NakliTechie/menagerie",
+  "revision": "837a3ee5fcf92c71a84dfefce062e6a9cf9a2457",
+  "declared_relay_version": "0.6.0",
+  "protocol_version": "1.3",
+  "scope": "Source/fixture inventory only; not proof of behavioral compatibility or release-binary contents.",
+  "fixtures_directory_file_count": 30,
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 34523,
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+    },
+    {
+      "path": "index.html",
+      "bytes": 251422,
+      "sha256": "b0dd455215f713235331d5ab6ac958a1842dee9d03a5f88ec0137472882e5607"
+    },
+    {
+      "path": "protocol/fixtures/acp-smoke.jsonl",
+      "bytes": 110751,
+      "sha256": "727a3801cb852a084e91390c63942e2d8daa03bfe87e4a017082eff7ed153568"
+    },
+    {
+      "path": "protocol/fixtures/frames/attach.json",
+      "bytes": 55,
+      "sha256": "0a99a14ccfadd21711ae8bb240e4087e7d3bd037cddf1f3a2eb918256551f744"
+    },
+    {
+      "path": "protocol/fixtures/frames/attached.json",
+      "bytes": 187,
+      "sha256": "d1e49d29224940467d0afdf7753cba0a52d08b5430be1edcf9789e376629f419"
+    },
+    {
+      "path": "protocol/fixtures/frames/error.json",
+      "bytes": 122,
+      "sha256": "e5d581f28830353f0cde82b3ba454807349d3f129c17eb201d8e00400f5a00ec"
+    },
+    {
+      "path": "protocol/fixtures/frames/event-child-spawned.json",
+      "bytes": 150,
+      "sha256": "f1b20207ce6717729803c3d9d822d052511ed9c7354cd28bd0d9e2d03d4aaea3"
+    },
+    {
+      "path": "protocol/fixtures/frames/event-done.json",
+      "bytes": 109,
+      "sha256": "ac29b07bc9efd77cf32c77eda730a4319ec0417840ae2d0f3faadb808106644a"
+    },
+    {
+      "path": "protocol/fixtures/frames/event.json",
+      "bytes": 108,
+      "sha256": "f2b3887f58620dc63ad363a57cfdea71cdf621d401632c9129f9fb8b295bac64"
+    },
+    {
+      "path": "protocol/fixtures/frames/hello-pre12.json",
+      "bytes": 236,
+      "sha256": "93f736d202adc85ad85d215deac30107e7fb1a04f7ffbdd4f879e1a8021666cd"
+    },
+    {
+      "path": "protocol/fixtures/frames/hello.json",
+      "bytes": 542,
+      "sha256": "1f460c2216cc693dd9406a0c46704dc4fafbdecbc94226a9b46234e462e38100"
+    },
+    {
+      "path": "protocol/fixtures/frames/input.json",
+      "bytes": 118,
+      "sha256": "628bd588dec8d5ba3a23e494a8380d293131d5d0a52ab774079add7272096c47"
+    },
+    {
+      "path": "protocol/fixtures/frames/output.json",
+      "bytes": 98,
+      "sha256": "341a2a6f7b6cabf5da490ecb5863732692875f80c84019ad947b03c30b8618b6"
+    },
+    {
+      "path": "protocol/fixtures/frames/permission_request.json",
+      "bytes": 891,
+      "sha256": "d1839671bb66ca254567b9d9b5daa9683bc2a7b5506c6d577ad19c74f32aca27"
+    },
+    {
+      "path": "protocol/fixtures/frames/permission_response.json",
+      "bytes": 178,
+      "sha256": "317286550e04a313cf4f8313ee24556781abee7fc4a1708d4702ce99d1445bf1"
+    },
+    {
+      "path": "protocol/fixtures/frames/prompt-wait.json",
+      "bytes": 291,
+      "sha256": "8c1033ec3fddc7dca7fd299fe99942669ae57e2fd6d096f70bb018d7c7aa13e8"
+    },
+    {
+      "path": "protocol/fixtures/frames/prompt.json",
+      "bytes": 162,
+      "sha256": "79983d8b39c81bdd1ed3bd3ca76b53af9920f7473283eb79e0ea493c2612a5fc"
+    },
+    {
+      "path": "protocol/fixtures/frames/register.json",
+      "bytes": 78,
+      "sha256": "ce5033155a4e470329fc5687a3333e11c417349a45a685a7a76b9609e7b95ec4"
+    },
+    {
+      "path": "protocol/fixtures/frames/registered.json",
+      "bytes": 25,
+      "sha256": "fc41bfe1402213ab67d8f747f56d7947c3be212282fd28002709cde5f01889f9"
+    },
+    {
+      "path": "protocol/fixtures/frames/report-status.json",
+      "bytes": 196,
+      "sha256": "010128404e1eda39653df19e316c961952ab59cb03d530bb6d25ea50f9552333"
+    },
+    {
+      "path": "protocol/fixtures/frames/resume.json",
+      "bytes": 120,
+      "sha256": "3e5e3964f9b2ce356161405b3c3594e5a277cb28aa67edbc4b985e67e4fe53b9"
+    },
+    {
+      "path": "protocol/fixtures/frames/resume_failed.json",
+      "bytes": 62,
+      "sha256": "52812f70752cf19cd48e1a9e5a267c73904d0c533d558ccdc3e6ae4978e1894e"
+    },
+    {
+      "path": "protocol/fixtures/frames/seen.json",
+      "bytes": 115,
+      "sha256": "bb51dcfcab59b72fcc3b2e6cedcbccb28703dcacd1b770946e348a92f96fd6a7"
+    },
+    {
+      "path": "protocol/fixtures/frames/session_update.json",
+      "bytes": 424,
+      "sha256": "b5845cd7dca24a0b7cf8a6848fa70f9ec24fa7580689c781556ab64dfc28e8ee"
+    },
+    {
+      "path": "protocol/fixtures/frames/sessions.json",
+      "bytes": 491,
+      "sha256": "cd71d35d485377286e29f3cb44c0855a6e8dc82365dc63aa44d6bdf040332e5f"
+    },
+    {
+      "path": "protocol/fixtures/frames/signal-subtree.json",
+      "bytes": 139,
+      "sha256": "590a9d2b53873fba48ed2f001d66c92a71d1d0ea4c1446a29063fae0c7adc83e"
+    },
+    {
+      "path": "protocol/fixtures/frames/signal.json",
+      "bytes": 149,
+      "sha256": "029302e64c0e8ec07b6b91af277cf4117148e107286c3f7c30f5059c3b5f4532"
+    },
+    {
+      "path": "protocol/fixtures/frames/spawn-resume.json",
+      "bytes": 213,
+      "sha256": "c06787534c1dfa8854c8bf679121c8a0a61c9ef0049d8526d97dd4a87038c293"
+    },
+    {
+      "path": "protocol/fixtures/frames/spawn.json",
+      "bytes": 224,
+      "sha256": "129a03eecd073023e5b38c3fa4989a329d0683f3763f3964ab344969eacb9c9a"
+    },
+    {
+      "path": "protocol/fixtures/frames/spawned.json",
+      "bytes": 326,
+      "sha256": "c8ebb83f66c36857d5c5ad39a68b8ae7c658b93a59329fdee7f2cdc45f7622be"
+    },
+    {
+      "path": "protocol/fixtures/frames/wait.json",
+      "bytes": 221,
+      "sha256": "dca93515ef23d756c1400c5b1bd8b3c4c6298e4be18f51833a4950ab7f73ac83"
+    },
+    {
+      "path": "protocol/fixtures/frames/waited.json",
+      "bytes": 127,
+      "sha256": "7b864ec86027598e177ac78fee7567382ca3b1549810c11fe036881773bcfc2b"
+    },
+    {
+      "path": "protocol/types.ts",
+      "bytes": 16462,
+      "sha256": "f4622370f305eaef85f38a38529e815acfb98aa0a57a1c61def73ee06b7ae871"
+    },
+    {
+      "path": "protocol/validate-fixtures.mjs",
+      "bytes": 8757,
+      "sha256": "85c0c1aa3341fa9c4f3e562038362d9473bcb7896908131379013ecfbb592eed"
+    },
+    {
+      "path": "relay-go/go.mod",
+      "bytes": 183,
+      "sha256": "3a851350679228b32adbe9dd12326d4383df5938979c89757e77c0ee9875242c"
+    },
+    {
+      "path": "relay-go/internal/acp/session.go",
+      "bytes": 16888,
+      "sha256": "f8bebd7dd64b1caa411b5077f3228c02c2309aa52c3817487be7be49547d75ca"
+    },
+    {
+      "path": "relay-go/internal/pty/session.go",
+      "bytes": 3500,
+      "sha256": "1cb74f837b4de434c0b5041c800deb249b868fb2c685be7a8a31360537a01c61"
+    },
+    {
+      "path": "relay-go/internal/server/server.go",
+      "bytes": 46615,
+      "sha256": "ff54fc7a1a035c6e5517f5bcfc80b32f64bbfc047654da038d69fae6fa92e3f8"
+    },
+    {
+      "path": "relay-go/internal/server/server_acp_test.go",
+      "bytes": 27179,
+      "sha256": "38d3d7fd1f742d0b8748cfd9e57e55fcc7a2caa874759ad2cc6377fe7fa7dd24"
+    },
+    {
+      "path": "relay-go/internal/server/wait.go",
+      "bytes": 10161,
+      "sha256": "3cea091862c4ac5bb17edc4ebf86ffd13fb8113ba9f9c7dbe9e67ee2e750e5ae"
+    },
+    {
+      "path": "relay-go/internal/server/wait_test.go",
+      "bytes": 17417,
+      "sha256": "8ff1c64fa2e27cf27bf9c33ee73e58140801948e4c7f06da9c00f57d0dca8d6f"
+    },
+    {
+      "path": "relay-go/materialise/engine.go",
+      "bytes": 20935,
+      "sha256": "97e37a2be727a58a59a48740d005d3e9464143f6c087a08a680e45b05af8b928"
+    }
+  ]
+}
