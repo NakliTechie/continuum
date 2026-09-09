@@ -32,8 +32,11 @@ for (const dir of ["valid", "invalid", "secrets"]) {
     const text = readFileSync(join(here, "testdata", dir, name), "utf8");
     const jsIssues = fleetValidateText(text);
     const goIssues = go[key] ?? [];
-    const jsPaths = [...new Set(jsIssues.map((i) => i.path))].toSorted();
-    const goPaths = [...new Set(goIssues.map((i) => i.path))].toSorted();
+    // path AND code, undeduplicated: comparing a deduplicated set of paths made a
+    // differing `code` — and a differing count at one path — invisible to the very
+    // gate D6 cites as the reason a rule cannot drift between the two ingresses.
+    const jsPaths = jsIssues.map((i) => i.path + "|" + i.code).toSorted();
+    const goPaths = goIssues.map((i) => i.path + "|" + i.code).toSorted();
     checked++;
     if (JSON.stringify(jsPaths) !== JSON.stringify(goPaths)) {
       bad++;

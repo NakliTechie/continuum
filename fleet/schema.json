@@ -150,15 +150,26 @@
                   },
                   "port_var": {
                     "type": "string",
-                    "description": "Present means once per workspace; absent means once per repo."
+                    "description": "Present means once per workspace; absent means once per repo.",
+                    "minLength": 1
                   },
                   "supervise": {
                     "type": "boolean",
                     "description": "Keep checking the service after its probe passed; requires port_var, because supervision needs something concrete to check. A supervised service that dies flips the workspace to unhealthy."
                   }
                 },
-                "dependentRequired": {
-                  "supervise": [
+                "if": {
+                  "properties": {
+                    "supervise": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "supervise"
+                  ]
+                },
+                "then": {
+                  "required": [
                     "port_var"
                   ]
                 }

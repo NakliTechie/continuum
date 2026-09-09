@@ -42,7 +42,7 @@ func Validate(s *Spec) []Issue {
 	var out []Issue
 	add := func(path, code, msg string) { out = append(out, Issue{Path: path, Code: code, Message: msg}) }
 
-	if s.Spec == "" {
+	if strings.TrimSpace(s.Spec) == "" {
 		add("/spec", "required", "spec is required and must be "+SpecVersion)
 	} else if s.Spec != SpecVersion {
 		add("/spec", "unsupported_version", "unsupported spec version "+s.Spec+", want "+SpecVersion)
@@ -59,7 +59,11 @@ func Validate(s *Spec) []Issue {
 		add("/topology", "required", "topology is required and has no default — name it")
 	}
 
+	// declared: everything ${VAR} may resolve against. portNames: only the
+	// allocated ports. They are NOT the same set — a builtin is interpolatable but
+	// is not a port, so port_var must be checked against portNames alone.
 	declared := map[string]bool{}
+	portNames := map[string]bool{}
 	for _, v := range BuiltinVars {
 		declared[v] = true
 	}
@@ -69,26 +73,33 @@ func Validate(s *Spec) []Issue {
 			add(base+"/name", "required", "port entry needs a name to bind the allocated port to")
 		} else {
 			declared[p.Name] = true
+			portNames[p.Name] = true
 		}
 		if p.Range[0] <= 0 || p.Range[1] <= 0 || p.Range[0] > p.Range[1] {
 			add(base+"/range", "invalid_range", fmt.Sprintf("range must be [low, high] with 0 < low <= high, got [%d, %d]", p.Range[0], p.Range[1]))
 		}
 	}
 
-	if s.Workspace.Isolation == "" && len(s.Workspace.Materialise.Ports)+len(s.Workspace.Materialise.Files)+
-		len(s.Workspace.Materialise.Commands) == 0 && s.Workspace.Materialise.Escape == "" {
+	isolation := strings.TrimSpace(s.Workspace.Isolation)
+	if isolation == "" && len(s.Workspace.Materialise.Ports)+len(s.Workspace.Materialise.Files)+
+		len(s.Workspace.Materialise.Commands) == 0 && strings.TrimSpace(s.Workspace.Materialise.Escape) == "" {
 		add("/workspace", "required", "workspace is required and must declare an isolation and a materialise block")
 	}
-	if s.Workspace.Isolation != "" && s.Workspace.Isolation != "worktree" {
+	if isolation != "" && isolation != "worktree" {
 		add("/workspace/isolation", "unsupported", "isolation "+s.Workspace.Isolation+" is not supported; only \"worktree\"")
+	}
+
+	if esc := s.Workspace.Materialise.Escape; esc != "" {
+		out = append(out, undeclaredVars("/workspace/materialise/escape", esc, declared)...)
 	}
 
 	for i, f := range s.Workspace.Materialise.Files {
 		base := fmt.Sprintf("/workspace/materialise/files/%d", i)
+		from, tmpl := strings.TrimSpace(f.From) != "", strings.TrimSpace(f.Template) != ""
 		switch {
-		case f.From == "" && f.Template == "":
+		case !from && !tmpl:
 			add(base, "required", "file entry needs exactly one of from (copy) or template (render)")
-		case f.From != "" && f.Template != "":
+		case from && tmpl:
 			add(base, "exclusive", "file entry has both from and template; exactly one is allowed")
 		}
 		if strings.TrimSpace(f.To) == "" {
@@ -119,7 +130,7 @@ func Validate(s *Spec) []Issue {
 		if strings.TrimSpace(sv.Run) == "" {
 			add(base+"/run", "required", "service entry needs a run string")
 		}
-		if strings.TrimSpace(sv.PortVar) != "" && !declared[sv.PortVar] {
+		if strings.TrimSpace(sv.PortVar) != "" && !portNames[sv.PortVar] {
 			add(base+"/port_var", "undeclared_var", "port_var "+sv.PortVar+" is not a declared port")
 		}
 		// Supervision must have something to check. A supervised service with no
@@ -132,7 +143,7 @@ func Validate(s *Spec) []Issue {
 	}
 	for i, p := range s.Workspace.Materialise.Health {
 		base := fmt.Sprintf("/workspace/materialise/health/%d", i)
-		switch p.Probe {
+		switch strings.TrimSpace(p.Probe) {
 		case "http":
 			if strings.TrimSpace(p.URL) == "" {
 				add(base+"/url", "required", "http probe needs a url")

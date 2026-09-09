@@ -61,6 +61,16 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		return nil, fmt.Errorf("spec is invalid: %s", issues[0].Error())
 	}
 	res := &Result{}
+	// A stage that fails must leave the record honestly unhealthy. An early return
+	// used to strand it at `materialising` — neither ready nor unhealthy, and
+	// nothing would move it again.
+	fail := func(format string, a ...any) (*Result, error) {
+		err := fmt.Errorf(format, a...)
+		if !e.DryRun {
+			_ = e.Prov.SetStateReason(name, workspace.StateUnhealthy, err.Error())
+		}
+		return res, err
+	}
 
 	// --- 1. ports (via the provisioner, which owns allocation and the record) ---
 	// A dry run never allocates, never creates a worktree and never writes a
@@ -92,7 +102,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, f := range m.Files {
 		step, err := e.materialiseFile(f, rec, repoRoot)
 		if err != nil {
-			return res, fmt.Errorf("files[%d]: %w", i, err)
+			return fail("files[%d]: %w", i, err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -101,7 +111,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, c := range m.Commands {
 		step, err := e.runCommand(c, rec, repoRoot)
 		if err != nil {
-			return res, fmt.Errorf("commands[%d]: %w", i, err)
+			return fail("commands[%d]: %w", i, err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -110,7 +120,7 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	for i, sv := range m.Services {
 		step, err := e.startService(sv, rec, repoRoot)
 		if err != nil {
-			return res, fmt.Errorf("services[%d]: %w", i, err)
+			return fail("services[%d]: %w", i, err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -129,8 +139,8 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		step := Step{Stage: "escape", Action: "run", Detail: m.Escape}
 		if e.DryRun {
 			step.Skipped, step.Reason = true, "dry run"
-		} else if _, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), m.Escape, 10*time.Minute); err != nil {
-			return res, fmt.Errorf("escape: %w", err)
+		} else if _, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), interpolate(m.Escape, rec.Vars), 10*time.Minute); err != nil {
+			return fail("escape: %w", err)
 		}
 		res.Steps = append(res.Steps, step)
 	}
@@ -188,6 +198,12 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	}
 	if !e.DryRun {
 		_ = e.Prov.SetStateReason(name, res.State, reason)
+		// Re-read: `rec` is a pre-run snapshot, so without this the result reports
+		// the state the workspace was in BEFORE the run — a just-materialised
+		// workspace would go over the wire as `provisioning`.
+		if fresh, err := e.Prov.Load(name); err == nil && fresh != nil {
+			res.Workspace = fresh
+		}
 	}
 	return res, nil
 }
@@ -262,7 +278,7 @@ func (e *Engine) runCommand(c fleet.Command, rec *workspace.Record, repoRoot str
 // per-workspace instance. A service already up is left alone (D3).
 func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot string) (Step, error) {
 	scope := repoRoot + "|" + sv.Name
-	if sv.PortVar != "" {
+	if strings.TrimSpace(sv.PortVar) != "" {
 		scope += "|" + rec.Name
 	}
 	line := interpolate(sv.Run, rec.Vars)
@@ -425,8 +441,10 @@ func RenderPlan(spec *fleet.Spec, res *Result) string {
 }
 
 // superviseService checks that a supervised service is still answering on its
-// allocated port. The validator guarantees a supervised service has a port_var,
-// so there is always something concrete to check rather than an assumption.
+// allocated port. The validator requires a supervised service to name a real
+// allocated port (not merely an interpolatable name), so there is something
+// concrete to check rather than an assumption — but the missing-port branch below
+// stays, because this is reachable from a record written by an older version.
 // settle is how long superviseService waits for a service to come up before
 // calling it dead. "Did it come up?" (right after the start command returned)
 // and "is it still up?" (a later check) are different questions: `docker compose
@@ -460,8 +478,13 @@ func (e *Engine) superviseService(sv fleet.Service, rec *workspace.Record, settl
 }
 
 // Supervise re-checks every supervised service in the spec and records the
-// resulting state. The relay calls this after materialisation, on whatever
-// cadence it chooses: a workspace that was ready and whose service has since
+// resulting state.
+//
+// NOTHING CALLS THIS YET outside tests: the supervision cadence lands in C5 with
+// the teardown executor. Until then a service that dies is caught only by the
+// check inside a materialise pass, not between passes. Said plainly here for the
+// same reason hooks.on_stop says it — a promise the code does not keep is worse
+// than an absent feature. When it is wired, the caller decides the cadence: a workspace that was ready and whose service has since
 // died must stop reading ready — and one that was marked unhealthy by this very
 // check must be able to read ready again once the service answers, or the first
 // blip would condemn it forever.
@@ -478,6 +501,14 @@ func (e *Engine) Supervise(spec *fleet.Spec, name string) (string, error) {
 	}
 	if rec == nil {
 		return "", fmt.Errorf("no such workspace %q", name)
+	}
+	// Only a workspace that actually completed a materialise has a supervision
+	// verdict worth revising. Without this, two calls would walk a
+	// never-materialised workspace provisioning -> unhealthy -> ready on the
+	// strength of one TCP dial, with no file rendered and no command run — and
+	// `ready` is the state a workspace is handed to an agent in.
+	if rec.State != workspace.StateReady && rec.State != workspace.StateUnhealthy {
+		return rec.State, nil
 	}
 	for _, sv := range spec.Workspace.Materialise.Services {
 		if !sv.Supervise {
