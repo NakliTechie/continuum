@@ -120,13 +120,16 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			rec.StartedAt = existing.StartedAt
 		}
 		rs.Workspaces[name] = rec
-		return saveRecords(p.Home, rs)
+		if err := saveRecords(p.Home, rs); err != nil {
+			return err
+		}
+		// Git serializes updates to individual refs, but worktree registration
+		// spans several administrative files. Keep inspection and creation under
+		// the relay-wide lock so concurrent provisions never observe a partially
+		// registered sibling worktree.
+		return p.ensureWorktree(repoRoot, path, branch)
 	})
 	if err != nil {
-		return nil, err
-	}
-
-	if err := p.ensureWorktree(repoRoot, path, branch); err != nil {
 		return nil, err
 	}
 	return rec, nil
