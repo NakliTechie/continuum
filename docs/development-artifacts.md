@@ -18,3 +18,5 @@ Replace BLOCK_ID with the full value returned by open. Ctrl-] detaches the viewe
 Ctrl-C in the daemon terminal stops the daemon and its managed processes. Recorded history survives; this alpha’s processes and screen state do not survive daemon restart. The unchanged Menagerie browser can use the same daemon’s legacy endpoint for legacy-profile PTYs and ACP sessions. It cannot render the opt-in screen-v1 profile yet.
 
 Do not replace an installed Menagerie relay as part of this demo. Installation cutover, release publication, remote hosts, native Linux execution, full TUI/Unicode conformance and real-provider runs remain separate gates.
+
+The artifact check compares `go version -m ./continuum` against `git rev-parse HEAD`, in addition to the CLI version. This Go toolchain skipped the nested worktree's `.git` file and reported the parent checkout's revision. The local packaging procedure therefore builds an identical committed tree from a clean standalone temporary clone and verifies both tree identity and embedded revision before delivery.

@@ -24,7 +24,7 @@ const startupProbeScript = `import sys,json,os,time
 mode=sys.argv[1]
 def send(m): print(json.dumps(m,separators=(',',':')),flush=True)
 def upd(n,pad=0): send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'checker-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':str(n)+'x'*pad}}}})
-def perm(n,pad=0): send({'jsonrpc':'2.0','id':9007199254740993 if n==0 else 'rpc-'+str(n),'method':'session/request_permission','params':{'sessionId':'checker-session','options':[{'optionId':'chosen-allow','kind':'allow_once','name':'Allow deliberately'},{'optionId':'chosen-deny','kind':'reject_once','name':'Reject deliberately'}],'padding':'x'*pad}})
+def perm(n,pad=0): send({'jsonrpc':'2.0','id':9007199254740993 if n==0 else 'rpc-'+str(n),'method':'session/request_permission','params':{'sessionId':'checker-session','toolCall':{'toolCallId':'checker-call-'+str(n)},'options':[{'optionId':'chosen-allow','kind':'allow_once','name':'Allow deliberately'},{'optionId':'chosen-deny','kind':'reject_once','name':'Reject deliberately'}],'padding':'x'*pad}})
 def burst(which):
  if which=='frames':
   for n in range(2049): upd(n)
@@ -205,7 +205,7 @@ func TestCheckerWSStartupApprovalAndReconnect(t *testing.T) {
 					if i == 1 {
 						want = `"rpc-1"`
 					}
-					if string(e.ID) != want || string(e.Result) != `{"optionId":"chosen-allow"}` {
+					if string(e.ID) != want || string(e.Result) != `{"outcome":{"outcome":"selected","optionId":"chosen-allow"}}` {
 						t.Fatal(text)
 					}
 					break

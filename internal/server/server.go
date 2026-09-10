@@ -959,6 +959,9 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 	sess.SetSinks(func(params json.RawMessage) { s.deliverStructured(id, params) }, func(reqID string, params json.RawMessage) {
 		e.promptMu.Lock()
 		defer e.promptMu.Unlock()
+		if !sess.HasPendingPermission(reqID) {
+			return
+		}
 		s.deliverPermissionRequest(id, reqID, params)
 		s.queueStructuredEvent(e, id, protocol.EventNeedsInput, nil)
 	})
@@ -1023,7 +1026,9 @@ func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *i
 	s.record(id, event, map[string]any{"exit_code": code})
 	noteEventStatus(e, event)
 	b, _ := json.Marshal(protocol.Event{Type: protocol.TypeEvent, SessionID: id, Event: event, ExitCode: code, At: time.Now().UTC().Format(time.RFC3339)})
-	_, _ = e.trySend(b)
+	if sent, closed := e.trySend(b); !sent && !closed {
+		s.dropStructured(e, id)
+	}
 }
 
 const (
@@ -1491,9 +1496,17 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 			e.acp.Kill()
 		case protocol.SignalInterrupt:
 			// Cancellation maps to ACP's cancel, not to a signal; kill stays the hard stop.
+			e.promptMu.Lock()
 			if err := e.acp.Cancel(); err != nil {
 				cn.sendError(msg.SessionID, "bad_message", "cancel failed: "+err.Error())
+			} else if !e.acp.HasPendingPermissions() && e.currentStatus() == protocol.StatusNeedsInput {
+				event := protocol.EventIdle
+				if e.promptActive {
+					event = protocol.EventRunning
+				}
+				cn.srv.queueStructuredEvent(e, msg.SessionID, event, nil)
 			}
+			e.promptMu.Unlock()
 		case protocol.SignalResize:
 			// No terminal geometry in a structured session.
 		default:

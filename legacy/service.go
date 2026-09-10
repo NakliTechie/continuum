@@ -68,7 +68,6 @@ func ensureConfig(path string) *config.Config {
 			fatal(err)
 		}
 		fmt.Printf("First run — created %s (relay %q, listening %s).\n", path, cfg.Name, cfg.Listen)
-		return cfg
 	}
 	cfg, err := config.Load(path)
 	if err != nil {

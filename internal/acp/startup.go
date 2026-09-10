@@ -59,7 +59,7 @@ func (s *Session) flushHeldLocked() {
 			s.onUpdate(ev.payload)
 			s.pendingUpdates[0] = nil
 			s.pendingUpdates = s.pendingUpdates[1:]
-		} else {
+		} else if s.HasPendingPermission(ev.requestID) {
 			if s.onPermissionRequest == nil {
 				return
 			}
@@ -74,6 +74,9 @@ func (s *Session) deliverOrHold(ev startupEvent) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 	if s.eventErr != nil {
+		return
+	}
+	if ev.requestID != "" && !s.HasPendingPermission(ev.requestID) {
 		return
 	}
 	s.seedHeldLocked()

@@ -31,7 +31,7 @@ import (
 )
 
 // ProtocolVersion is the ACP protocol version negotiated at initialize; it
-// must match the pin recorded in protocol/acp-pin.md.
+// must match the unchanged inherited pin recorded in docs/acp-protocol.md.
 const ProtocolVersion = 1
 
 const (
@@ -99,8 +99,9 @@ type Session struct {
 	w        *bufio.Writer
 	cap      *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
 
-	writeMu sync.Mutex
-	capMu   sync.Mutex // serializes event-log (s.cap) writes across reader + writer goroutines
+	decisionMu sync.Mutex // serializes permission decisions, cancellation, and new prompt admission
+	writeMu    sync.Mutex
+	capMu      sync.Mutex // serializes event-log (s.cap) writes across reader + writer goroutines
 
 	mu              sync.Mutex
 	nextID          int64
@@ -109,6 +110,7 @@ type Session struct {
 	perms           map[string]*pendingPerm   // menagerie request_id -> pending permission
 	closed          bool
 	permissionBytes int
+	cancelling      bool // guarded by mu; late requests receive cancelled until the next prompt
 
 	// Callbacks fire on the reader goroutine; keep them fast or hand off.
 	// Set OnUpdate through SetOnUpdate, never directly: a resumed session's
@@ -367,9 +369,20 @@ func (s *Session) handlePermissionRequest(env *Envelope, raw []byte) {
 	}
 	_ = json.Unmarshal(env.Params, &pr)
 
+	s.decisionMu.Lock()
 	s.mu.Lock()
+	if s.cancelling {
+		s.mu.Unlock()
+		err := s.write(Envelope{JSONRPC: "2.0", ID: env.ID, Result: permissionResult("cancelled", "")})
+		s.decisionMu.Unlock()
+		if err != nil {
+			s.failEvents(fmt.Errorf("cancel late permission: %w", err))
+		}
+		return
+	}
 	if len(s.perms) >= maxPendingPermissions || s.permissionBytes+len(raw) > maxPendingPermissionBytes {
 		s.mu.Unlock()
+		s.decisionMu.Unlock()
 		s.failEvents(fmt.Errorf("ACP pending permission budget exceeded (%d requests / %d bytes)", maxPendingPermissions, maxPendingPermissionBytes))
 		return
 	}
@@ -378,6 +391,7 @@ func (s *Session) handlePermissionRequest(env *Envelope, raw []byte) {
 	s.perms[reqID] = &pendingPerm{rpcID: append(json.RawMessage(nil), env.ID...), options: pr.Options, bytes: len(raw)}
 	s.permissionBytes += len(raw)
 	s.mu.Unlock()
+	s.decisionMu.Unlock()
 
 	s.deliverOrHold(startupEvent{requestID: reqID, payload: raw})
 }
@@ -387,6 +401,8 @@ func (s *Session) handlePermissionRequest(env *Envelope, raw []byte) {
 // approve → allow_once (fallback allow_always), approve_always → allow_always,
 // reject → any reject_*.
 func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string) error {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
 	s.mu.Lock()
 	p := s.perms[requestID]
 	if p == nil {
@@ -407,16 +423,17 @@ func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string)
 		s.mu.Unlock()
 		return fmt.Errorf("no offered option for outcome %q", outcome)
 	}
-	delete(s.perms, requestID)
-	s.permissionBytes -= p.bytes
 	rpcID := append(json.RawMessage(nil), p.rpcID...)
 	s.mu.Unlock()
 
 	if optionID == "" {
 		return fmt.Errorf("no option for outcome %q", outcome)
 	}
-	result, _ := json.Marshal(map[string]string{"optionId": optionID})
-	return s.write(Envelope{JSONRPC: "2.0", ID: rpcID, Result: result})
+	if err := s.write(Envelope{JSONRPC: "2.0", ID: rpcID, Result: permissionResult("selected", optionID)}); err != nil {
+		return err
+	}
+	s.retirePermission(requestID, p)
+	return nil
 }
 
 func resolveOutcome(outcome string, options []permOption) string {
@@ -452,6 +469,11 @@ func resolveOutcome(outcome string, options []permOption) string {
 // channel on which the turn's final response will arrive (stopReason et al).
 // Turns can run long — there is deliberately no timeout here.
 func (s *Session) Prompt(text string) (<-chan *Envelope, error) {
+	s.decisionMu.Lock()
+	defer s.decisionMu.Unlock()
+	s.mu.Lock()
+	s.cancelling = false
+	s.mu.Unlock()
 	params := map[string]any{
 		"sessionId": s.ACPSessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": text}},
@@ -461,13 +483,7 @@ func (s *Session) Prompt(text string) (<-chan *Envelope, error) {
 }
 
 // Cancel asks the agent to stop the current turn (ACP cancel notification).
-func (s *Session) Cancel() error {
-	return s.write(Envelope{
-		JSONRPC: "2.0",
-		Method:  "session/cancel",
-		Params:  mustJSON(map[string]string{"sessionId": s.ACPSessionID}),
-	})
-}
+func (s *Session) Cancel() error { return s.cancelPermissions() }
 
 // Kill hard-stops the child process (the `signal kill` path).
 func (s *Session) Kill() {

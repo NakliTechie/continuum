@@ -8,7 +8,7 @@
 // Transport: WebSocket, JSON text frames. One connection per browser<->relay
 // pair; sessions multiplex via session_id. v1.2 adds structured sessions
 // ("acp"): ACP payloads ride nested inside Menagerie frames as RawMessage and
-// are never interpreted here (see protocol/acp-pin.md).
+// are never interpreted here (see docs/acp-protocol.md).
 package protocol
 
 import "encoding/json"

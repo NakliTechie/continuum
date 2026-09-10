@@ -7,7 +7,6 @@ package workspace
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -68,8 +67,12 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			return err
 		}
 		existing := rs.Workspaces[name]
-		if existing != nil && (filepath.Clean(existing.Repo) != filepath.Clean(repoRoot) || existing.Branch != branch || filepath.Clean(existing.Path) != filepath.Clean(path)) {
+		if existing != nil && (!sameWorktreePath(existing.Repo, repoRoot) || existing.Branch != branch || !sameWorktreePath(existing.Path, path)) {
 			return fmt.Errorf("workspace %q already belongs to a different repository, branch or path", name)
+		}
+
+		if _, err := validateExistingWorktree(repoRoot, path, branch); err != nil {
+			return err
 		}
 
 		// Ports already handed to live workspaces are off the table, so a second
@@ -147,8 +150,8 @@ func vars(name, branch, repoRoot string, ports map[string]int) map[string]string
 // ensureWorktree creates the worktree if it is missing and leaves it alone if it
 // is already there, so Provision converges instead of failing on a second call.
 func (p *Provisioner) ensureWorktree(repoRoot, path, branch string) error {
-	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
-		return nil
+	if exists, err := validateExistingWorktree(repoRoot, path, branch); exists || err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -159,17 +162,16 @@ func (p *Provisioner) ensureWorktree(repoRoot, path, branch string) error {
 	} else {
 		args = append(args, "-b", branch)
 	}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoRoot
+	cmd := workspaceGit(repoRoot, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	_, err := validateExistingWorktree(repoRoot, path, branch)
+	return err
 }
 
 func branchExists(repoRoot, branch string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
-	cmd.Dir = repoRoot
+	cmd := workspaceGit(repoRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
 }
 
