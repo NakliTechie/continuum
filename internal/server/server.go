@@ -31,6 +31,7 @@ import (
 
 	"github.com/NakliTechie/continuum/internal/acp"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/protocol"
 	"github.com/NakliTechie/continuum/internal/pty"
@@ -792,8 +793,8 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 
 func (cn *conn) handleSpawn(raw json.RawMessage) {
 	if m := cn.srv.modern; m != nil {
-		blocks, err := m.Store.Blocks()
-		if err != nil || len(blocks) >= 1024 || m.degraded.Load() {
+		active, err := m.activeBlocks()
+		if err != nil || active >= journal.MaxBlocks || m.degraded.Load() {
 			cn.sendError("", "resource_exhausted", "durable state unavailable or block limit reached")
 			return
 		}

@@ -164,11 +164,36 @@ func Open(dir string) (*Store, error) {
 	return s, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
+
+// MaxBlocks bounds recorded blocks per host. At the cap the oldest block that
+// is no longer active is retired with its events; only a host whose blocks are
+// all active refuses a new one.
+const MaxBlocks = 1024
+
 func (s *Store) AddBlock(b Block) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("blocks"))
-		if bucket.Get([]byte(b.ID)) == nil && bucket.Stats().KeyN >= 1024 {
-			return ErrLimit
+		if bucket.Get([]byte(b.ID)) == nil && bucket.Stats().KeyN >= MaxBlocks {
+			oldest := ""
+			var started string
+			if err := bucket.ForEach(func(k, v []byte) error {
+				var old Block
+				if err := json.Unmarshal(v, &old); err != nil {
+					return err
+				}
+				if old.State != "active" && (oldest == "" || old.Started < started) {
+					oldest, started = string(k), old.Started
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			if oldest == "" {
+				return ErrLimit
+			}
+			if err := retireBlock(tx, oldest); err != nil {
+				return err
+			}
 		}
 		raw, err := json.Marshal(b)
 		if err != nil {
@@ -176,6 +201,44 @@ func (s *Store) AddBlock(b Block) error {
 		}
 		return bucket.Put([]byte(b.ID), raw)
 	})
+}
+
+// retireBlock removes a block record and its retained events, keeping the
+// retention counters exact. Sequence numbers are never reused; readers skip
+// the holes, and a cursor past the last surviving event moves to the
+// high-water mark (see Read).
+func retireBlock(tx *bolt.Tx, id string) error {
+	if err := tx.Bucket([]byte("blocks")).Delete([]byte(id)); err != nil {
+		return err
+	}
+	events := tx.Bucket([]byte("events"))
+	meta := tx.Bucket([]byte("meta"))
+	size := num(meta.Get([]byte("event_bytes")))
+	count := num(meta.Get([]byte("event_count")))
+	var keys [][]byte
+	if err := events.ForEach(func(k, v []byte) error {
+		var e Event
+		if err := json.Unmarshal(v, &e); err != nil {
+			return err
+		}
+		if e.Block == id {
+			keys = append(keys, append([]byte(nil), k...))
+			size -= min(size, uint64(len(v)))
+			count -= min(count, 1)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if err := events.Delete(k); err != nil {
+			return err
+		}
+	}
+	if err := meta.Put([]byte("event_count"), key(count)); err != nil {
+		return err
+	}
+	return meta.Put([]byte("event_bytes"), key(size))
 }
 func (s *Store) Blocks() ([]Block, error) {
 	out := []Block{}
@@ -299,6 +362,13 @@ func (s *Store) Read(after uint64, block string) (Page, error) {
 		}
 		size := 0
 		scanned := 0
+		// A retired block leaves holes in the sequence, possibly at its end;
+		// a cursor with nothing left to read moves to the high-water mark so
+		// readers wait for new work instead of re-reading an empty page.
+		if k, _ := c.Seek(key(after + 1)); k == nil {
+			p.Next = p.Last
+			return nil
+		}
 		for k, v := c.Seek(key(after + 1)); k != nil; k, v = c.Next() {
 			// A page normally stays below 512 KiB. One accepted larger frame
 			// is returned whole, alone, so its cursor can always advance.

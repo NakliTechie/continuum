@@ -75,6 +75,22 @@ func (s *Server) recordCaptureLoss(id string, cause error) {
 	}
 }
 
+// activeBlocks counts recorded blocks whose process is still running. Exited
+// and interrupted blocks are retired on demand, so only active ones cap opens.
+func (m *Modern) activeBlocks() (int, error) {
+	blocks, err := m.Store.Blocks()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, b := range blocks {
+		if b.State == "active" {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *Modern) recordBlock(id string, e *sessionEntry) {
 	if err := m.Store.AddBlock(journal.Block{ID: id, Agent: e.agent, PID: e.pid, State: "active", Started: e.startedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
 		m.degraded.Store(true)
@@ -313,9 +329,8 @@ func (m *Modern) effect(q api.Request) api.Response {
 		return api.Error(q.RequestID, class, code, msg, next)
 	}
 	if q.Operation == "open" {
-		blocks, err := m.Store.Blocks()
-		if err != nil || len(blocks) >= 1024 {
-			return fail("resource_exhausted", "block_limit", "state supports at most 1024 blocks", "status")
+		if active, err := m.activeBlocks(); err != nil || active >= journal.MaxBlocks {
+			return fail("resource_exhausted", "block_limit", "state supports at most 1024 active blocks", "status")
 		}
 		if q.Terminal == "screen-v1" && m.activeScreens() >= 16 {
 			return fail("resource_exhausted", "terminal_limit", "at most 16 server-owned terminals may run concurrently", "status")
