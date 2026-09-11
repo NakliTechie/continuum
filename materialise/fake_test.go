@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// RecordingExecutor runs nothing and remembers everything. It is the seam the
-// dry run (C3) and the tests share: a run against it proves the graph's shape
-// without touching the box.
+// RecordingExecutor runs nothing and remembers everything. It is the tests'
+// seam for proving a graph's shape without touching the box. The dry run does
+// not use it: Engine.DryRun short-circuits before any executor call.
 type RecordingExecutor struct {
 	mu   sync.Mutex
 	Runs []string
