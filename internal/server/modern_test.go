@@ -68,6 +68,12 @@ func TestModernObserversAndLegacyFencing(t *testing.T) {
 	if r := call("viewer", api.Request{Operation: "open"}); r.Class != "access_denied" {
 		t.Fatal(r)
 	}
+	for _, op := range []string{"input", "stop", "acquire", "takeover", "release", "renew", "resize"} {
+		r := call("viewer", api.Request{Operation: op, RequestID: "viewer-" + op, Block: "0123456789abcdef", Lease: "x", Data: "y", Cols: 80, Rows: 24})
+		if r.Class != "access_denied" || r.Code != "operator_required" {
+			t.Fatalf("observer %s: %+v", op, r)
+		}
+	}
 	q := api.Request{Operation: "open", RequestID: "open", Cwd: t.TempDir(), Args: []string{"/bin/cat"}}
 	first := call("operator", q)
 	id := value(t, first, "block_id")

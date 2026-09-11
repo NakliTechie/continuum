@@ -474,13 +474,13 @@ func TestACPTransportGuards(t *testing.T) {
 		t.Fatalf("expected unsupported_transport, got %v", errF)
 	}
 
-	// input stays PTY-only; prompt is the structured analogue.
+	// A prompt to a session this token does not own is an authorization
+	// rejection, never a parse failure.
 	sendMsg(t, c, msg{"type": "prompt", "session_id": "nope", "session_token": token, "text": "x"})
-	errF = recvUntil(t, c, func(f frame) bool {
-		code, _ := f["code"].(string)
-		return f["type"] == "error" && (code == protocol.ErrInvalidToken || code == "bad_message")
-	})
-	_ = errF
+	errF = recvUntil(t, c, func(f frame) bool { return f["type"] == "error" })
+	if code, _ := errF["code"].(string); code != protocol.ErrInvalidToken {
+		t.Fatalf("expected %s, got %v", protocol.ErrInvalidToken, errF)
+	}
 }
 
 // A relay must never offer an agent it cannot spawn: hello carries exactly the

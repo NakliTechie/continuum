@@ -42,7 +42,10 @@ def main():
                 if process.poll() is not None:
                     raise AssertionError('daemon exited before ready')
                 if (state / 'endpoint').exists():
-                    probe = subprocess.run([str(binary), 'status', '--state', str(state), '--json'], env=env, capture_output=True, timeout=2)
+                    try:
+                        probe = subprocess.run([str(binary), 'status', '--state', str(state), '--json'], env=env, capture_output=True, timeout=2)
+                    except subprocess.TimeoutExpired:
+                        continue  # a hung probe must not orphan the daemon; the deadline kills it
                     if probe.returncode == 0:
                         return process
                 time.sleep(.02)
