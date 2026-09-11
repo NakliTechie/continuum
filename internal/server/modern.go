@@ -75,6 +75,22 @@ func (s *Server) recordCaptureLoss(id string, cause error) {
 	}
 }
 
+// activeBlocks counts recorded blocks whose process is still running. Exited
+// and interrupted blocks are retired on demand, so only active ones cap opens.
+func (m *Modern) activeBlocks() (int, error) {
+	blocks, err := m.Store.Blocks()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, b := range blocks {
+		if b.State == "active" {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *Modern) recordBlock(id string, e *sessionEntry) {
 	if err := m.Store.AddBlock(journal.Block{ID: id, Agent: e.agent, PID: e.pid, State: "active", Started: e.startedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
 		m.degraded.Store(true)
@@ -265,9 +281,18 @@ func (m *Modern) mutate(q api.Request) api.Response {
 	encoded, _ := json.Marshal(q)
 	hash := sha256.Sum256(encoded)
 	digest := hex.EncodeToString(hash[:])
-	old, err := m.Store.Begin(q.RequestID, digest)
+	old, err := m.Store.Lookup(q.RequestID)
 	if err != nil {
-		return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot commit operation intent", "status")
+		return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot read operation intent", "status")
+	}
+	if old == nil {
+		// A request that cannot have an effect never occupies the ledger.
+		if q.Operation != "open" && m.s.entry(q.Block) == nil {
+			return api.Error(q.RequestID, "conflict", "not_running", "block has no running process", "status")
+		}
+		if old, err = m.Store.Begin(q.RequestID, digest); err != nil {
+			return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot commit operation intent", "status")
+		}
 	}
 	if old != nil {
 		if old.Digest != digest {
@@ -304,9 +329,8 @@ func (m *Modern) effect(q api.Request) api.Response {
 		return api.Error(q.RequestID, class, code, msg, next)
 	}
 	if q.Operation == "open" {
-		blocks, err := m.Store.Blocks()
-		if err != nil || len(blocks) >= 1024 {
-			return fail("resource_exhausted", "block_limit", "state supports at most 1024 blocks", "status")
+		if active, err := m.activeBlocks(); err != nil || active >= journal.MaxBlocks {
+			return fail("resource_exhausted", "block_limit", "state supports at most 1024 active blocks", "status")
 		}
 		if q.Terminal == "screen-v1" && m.activeScreens() >= 16 {
 			return fail("resource_exhausted", "terminal_limit", "at most 16 server-owned terminals may run concurrently", "status")
@@ -386,6 +410,17 @@ func (m *Modern) effect(q api.Request) api.Response {
 		return fail("indeterminate", "process_io", "process I/O failed; inspect state before retrying", "status")
 	}
 	return api.Result(q.RequestID, map[string]any{"accepted": true})
+}
+
+// leaseExpired reports whether token is a modern control lease for block that
+// has lapsed. The legacy adapter checks it so an expired lease is fenced on
+// both doors, not only on /v1. Callers hold controlMu.
+func (m *Modern) leaseExpired(block, token string) bool {
+	current, ok := m.leases[block]
+	if !ok || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(current.Token), []byte(token)) == 1 && !current.Expires.After(time.Now())
 }
 
 // BeginShutdown cancels pending handshakes and closes hijacked WebSockets,

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -42,18 +43,33 @@ func freePort(low, high int, taken map[int]bool) (int, error) {
 		if taken[p] {
 			continue
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err != nil {
-			continue // in use by something outside our record
+		if bindable(p) {
+			return p, nil
 		}
-		_ = ln.Close()
-		return p, nil
 	}
 	return 0, fmt.Errorf("no free port in range [%d, %d]", low, high)
 }
 
-// listenOn is a test seam: it binds a port so a test can prove the allocator
-// skips ports held outside its own record.
-func listenOn(port int) (net.Listener, error) {
-	return net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+// bindable reports whether nothing on the box holds the port. Loopback alone
+// is not enough: with SO_REUSEADDR, which Go sets, macOS lets 127.0.0.1:p bind
+// while a wildcard listener (Docker's published ports, most dev servers) holds
+// 0.0.0.0:p. The wildcard and the IPv6 loopback are probed as well; an
+// unsupported family counts as free.
+func bindable(p int) bool {
+	for _, addr := range []string{fmt.Sprintf("127.0.0.1:%d", p), fmt.Sprintf(":%d", p), fmt.Sprintf("[::1]:%d", p)} {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			if isUnsupported(err) {
+				continue
+			}
+			return false
+		}
+		_ = ln.Close()
+	}
+	return true
+}
+
+func isUnsupported(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "address family not supported") || strings.Contains(msg, "cannot assign requested address") || strings.Contains(msg, "protocol not available")
 }

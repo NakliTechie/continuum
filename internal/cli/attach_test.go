@@ -95,7 +95,7 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 			result.Durability = "volatile"
 		case "acquire", "takeover":
 			result = api.Result(q.RequestID, map[string]string{"lease": "private-attach-lease"})
-			if controlled {
+			if controlled && q.Operation == "acquire" { // takeover replaces; acquire is refused
 				result = api.Error(q.RequestID, "conflict", "controlled", "control is held", "takeover")
 			}
 		case "input":
@@ -166,6 +166,37 @@ func startAttach(t *testing.T, dir string, observer bool) *attachSession {
 	t.Cleanup(func() { master.Close(); slave.Close() })
 	go io.Copy(s.output, master)
 	go func() { s.done <- attach(dir, attachBlock, observer, false, slave, outputTTY, s.diag) }()
+	return s
+}
+
+// startTakeover is startAttach with --takeover: the controller path that
+// replaces an existing controller instead of refusing.
+func startTakeover(t *testing.T, dir string) *attachSession {
+	t.Helper()
+	master, slave, err := creackpty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = creackpty.Setsize(master, &creackpty.Winsize{Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	outputTTY, err := os.OpenFile(slave.Name(), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { outputTTY.Close() })
+	state, err := term.GetState(slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags, err := unix.FcntlInt(slave.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &attachSession{master: master, slave: slave, output: &safeBuffer{}, diag: &safeBuffer{}, done: make(chan int, 1), before: state, flags: flags}
+	t.Cleanup(func() { master.Close(); slave.Close() })
+	go io.Copy(s.output, master)
+	go func() { s.done <- attach(dir, attachBlock, false, true, slave, outputTTY, s.diag) }()
 	return s
 }
 func waitFor(t *testing.T, what string, check func() bool) {

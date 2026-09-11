@@ -44,7 +44,8 @@ func LintSecrets(b []byte) []Issue {
 					Code: "secret_in_spec",
 					Message: "line " + fmt.Sprint(line) + " looks like " + p.what +
 						"; the spec is committed, so secrets are referenced, never stored (D4) — " +
-						"resolve it at materialise time from an environment variable on the relay's box",
+						"keep it in a gitignored file beside the checkout and copy it in with files[].from " +
+						"(the relay's own environment is never inherited by declared commands)",
 				})
 			}
 		}

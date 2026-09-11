@@ -31,6 +31,7 @@ import (
 
 	"github.com/NakliTechie/continuum/internal/acp"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/protocol"
 	"github.com/NakliTechie/continuum/internal/pty"
@@ -123,6 +124,11 @@ type Server struct {
 
 // New builds a Server for the given config.
 func New(cfg *config.Config) *Server {
+	if cfg.CaptureDir == nil && !cfg.FromFile() {
+		// Only a file-loaded legacy config may imply ~/.menagerie/sessions.
+		disabled := ""
+		cfg.CaptureDir = &disabled
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		ctx: ctx, cancel: cancel, conns: make(map[*conn]context.CancelFunc),
@@ -356,6 +362,7 @@ func (s *Server) detach(cn *conn) {
 			e.sub = nil
 		}
 		e.subMu.Unlock()
+		e.dropWaiters(cn)
 	}
 }
 
@@ -787,8 +794,8 @@ func (cn *conn) handleRegister(raw json.RawMessage) {
 
 func (cn *conn) handleSpawn(raw json.RawMessage) {
 	if m := cn.srv.modern; m != nil {
-		blocks, err := m.Store.Blocks()
-		if err != nil || len(blocks) >= 1024 || m.degraded.Load() {
+		active, err := m.activeBlocks()
+		if err != nil || active >= journal.MaxBlocks || m.degraded.Load() {
 			cn.sendError("", "resource_exhausted", "durable state unavailable or block limit reached")
 			return
 		}
@@ -840,6 +847,13 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
 		return
 	}
+	// Every secret exists before the process does, so no failure after spawn
+	// leaves a child nobody waits for.
+	token, err := config.GenerateToken()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
+		return
+	}
 	s := cn.srv
 
 	// When tmux is in play the agent runs inside a detached tmux session (so it
@@ -869,15 +883,6 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 			_ = tmux.Kill(tmuxName)
 		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
-		return
-	}
-	token, err := config.GenerateToken()
-	if err != nil {
-		sess.Kill()
-		if tmuxName != "" {
-			_ = tmux.Kill(tmuxName)
-		}
-		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)
@@ -921,6 +926,11 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
 		return
 	}
+	token, err := config.GenerateToken()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
+		return
+	}
 	// A structured session reopens through ACP's own session/load — never by
 	// argv, and never by silently starting an empty conversation instead.
 	var sess *acp.Session
@@ -935,12 +945,6 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 			return
 		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
-		return
-	}
-	token, err := config.GenerateToken()
-	if err != nil {
-		sess.Kill()
-		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)
@@ -1010,6 +1014,12 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 			e.promptActive = false
 			if err := sess.ReadError(); err != nil {
 				s.recordCaptureLoss(id, err)
+			}
+			if err := sess.WriteError(); err != nil {
+				// The agent stopped draining stdin; the relay killed it so the
+				// session could not linger uncancellable. Say so in the record.
+				s.record(id, "agent_fault", map[string]any{"kind": "stdin_write", "message": err.Error()})
+				log.Printf("agent fault %s: stdin write: %v", id, err)
 			}
 			c := code
 			s.queueStructuredEvent(e, id, protocol.EventExited, &c)
@@ -1240,7 +1250,7 @@ func stampReplaySeq(b []byte) []byte {
 		return b
 	}
 	m["seq"] = json.RawMessage("-1")
-	if nb, err := json.Marshal(m); err == nil {
+	if nb, err := jsonwire.Marshal(m); err == nil {
 		return nb
 	}
 	return b
@@ -1448,6 +1458,10 @@ func (cn *conn) handleInput(raw json.RawMessage) {
 		cn.sendError("", "bad_message", "malformed input")
 		return
 	}
+	if m := cn.srv.modern; m != nil && m.leaseExpired(msg.SessionID, msg.SessionToken) {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "control lease expired; acquire current control")
+		return
+	}
 	sess, ok := cn.srv.getSession(msg.SessionID, msg.SessionToken)
 	if !ok {
 		if e := cn.srv.authSession(msg.SessionID, msg.SessionToken); e != nil && e.acp != nil {
@@ -1473,6 +1487,10 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 	var msg protocol.Signal
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		cn.sendError("", "bad_message", "malformed signal")
+		return
+	}
+	if m := cn.srv.modern; m != nil && m.leaseExpired(msg.SessionID, msg.SessionToken) {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "control lease expired; acquire current control")
 		return
 	}
 	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)
@@ -1530,7 +1548,7 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 		if inTmux {
 			_ = sess.Write([]byte{0x03}) // ^C through the attach PTY — SIGINT to the client would only detach
 		} else {
-			sess.Interrupt()
+			sess.Interrupt() // protocol 1.x defines interrupt as SIGINT to the agent process
 		}
 	case protocol.SignalResize:
 		_ = sess.Resize(msg.Cols, msg.Rows)

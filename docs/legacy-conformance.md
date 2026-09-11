@@ -6,7 +6,7 @@
 
 A black-box Go integration suite launches the pinned Menagerie relay in a disposable environment, drives its public WebSocket protocol, and asserts behaviors that a future shared runtime must preserve. No imports from Menagerie's internal packages and no persistent copy/fork of its runtime source.
 
-The baseline runner uses the existing local Menagerie Git object database, extracts the exact pinned revision into a temporary directory, verifies the 42 inventory hashes, and builds the relay plus its fake ACP test agent. Test children receive an isolated home, minimal environment, loopback-only listener, tmux disabled, and no real provider agents. It does not read the installed relay config or contact the installed service. Cleanup terminates the disposable process group and removes temporary files.
+The baseline runner uses the existing local Menagerie Git object database, extracts the exact pinned revision into a temporary directory, verifies the 42 inventory hashes, and builds the relay plus its fake ACP test agent. The inventory covers the runtime sources and fixtures; the fake agent and the relay's `main` are pinned by the extracted commit hash rather than by inventory entries. Test children receive an isolated home, minimal environment, loopback-only listener, tmux disabled, and no real provider agents. It does not read the installed relay config or contact the installed service. Cleanup terminates the disposable process group and removes temporary files.
 
 ## Cases in this slice
 
@@ -32,7 +32,7 @@ The future runtime can be supplied through explicit executable paths; the docume
 
 ## Run
 
-On macOS or Linux with Go 1.26.2, Git, Python 3 and tar:
+On macOS or Linux with Go 1.26.8, Git, Python 3 and tar:
 
 ```sh
 python3 scripts/check_legacy.py --source ../menagerie
@@ -54,6 +54,6 @@ All six unchanged black-box tests also passed against the Continuum-built candid
 
 ## Registration rotation
 
-A legacy server loaded from relay.toml reads current registration authority before registration and each subsequent command/output. `legacy token rotate` atomically replaces that private config. Old credentials fail on new connections; existing connections close before their next command or output. Idle connections need no polling timer. Rotation does not kill processes or adopt/restart services. Missing, malformed or empty credential configuration fails closed. Other config fields still require the existing restart workflow. Programmatically configured modern daemons keep their separate private-state credentials.
+A legacy server loaded from relay.toml reads current registration authority before registration and each subsequent command/output. `legacy token rotate` atomically rewrites only the `registration_token` line of that private config, keeping other keys and comments. Old credentials fail on new connections; existing connections close before their next command or output. Idle connections need no polling timer. Rotation does not kill processes or adopt/restart services. Missing, malformed or empty credential configuration fails closed. Other config fields still require the existing restart workflow. Programmatically configured modern daemons keep their separate private-state credentials.
 
 ACP argument configuration distinguishes omission from an explicit empty array. Omitted `acp_args` inherits a known agent’s suffix or defaults to `["acp"]`; `acp_args = []` starts the configured executable directly. The five dedicated ACP adapters use this empty suffix. Client-supplied spawn arguments are appended without modifying the configured slice.

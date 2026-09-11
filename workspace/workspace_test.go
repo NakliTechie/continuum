@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,18 +151,25 @@ func TestConcurrentProvisionNeverCollides(t *testing.T) {
 // A port already bound by something outside our record is skipped, not handed
 // out — the allocator bind-tests rather than trusting its own table.
 func TestAllocationSkipsPortsHeldOutsideTheRecord(t *testing.T) {
-	repo, home := testRepo(t), t.TempDir()
-	ln, err := listenOn(4600)
-	if err != nil {
-		t.Skip("port 4600 unavailable on this box")
-	}
-	defer ln.Close()
-	rec, err := New(home).Provision(specWithPorts(4600, 4601), repo, "w1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.Ports["PORT"] == 4600 {
-		t.Error("allocator handed out a port that was already bound")
+	// Loopback and wildcard holders alike: Go's SO_REUSEADDR lets a loopback
+	// bind succeed beside a wildcard listener on macOS, which is how a port a
+	// dev server already owned used to be handed out.
+	for name, addr := range map[string]string{"loopback": "127.0.0.1:%d", "wildcard": ":%d"} {
+		t.Run(name, func(t *testing.T) {
+			repo, home := testRepo(t), t.TempDir()
+			ln, err := net.Listen("tcp", fmt.Sprintf(addr, 4600))
+			if err != nil {
+				t.Skip("port 4600 unavailable on this box")
+			}
+			defer ln.Close()
+			rec, err := New(home).Provision(specWithPorts(4600, 4601), repo, "w1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.Ports["PORT"] == 4600 {
+				t.Errorf("allocator handed out a port a %s listener already holds", name)
+			}
+		})
 	}
 }
 

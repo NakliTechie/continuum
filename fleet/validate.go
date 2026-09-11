@@ -85,13 +85,19 @@ func Validate(s *Spec) []Issue {
 		}
 	}
 
+	// The schema requires isolation; the code agrees, so an editor and the
+	// runtime never disagree about the same document.
 	isolation := s.Workspace.Isolation
-	if isolation == "" && len(s.Workspace.Materialise.Ports)+len(s.Workspace.Materialise.Files)+
-		len(s.Workspace.Materialise.Commands) == 0 && s.Workspace.Materialise.Escape == "" {
-		add("/workspace", "required", "workspace is required and must declare an isolation and a materialise block")
-	}
-	if isolation != "" && isolation != "worktree" {
+	switch {
+	case isolation == "":
+		add("/workspace/isolation", "required", "workspace.isolation is required; only \"worktree\" is supported")
+	case isolation != "worktree":
 		add("/workspace/isolation", "unsupported", "isolation "+s.Workspace.Isolation+" is not supported; only \"worktree\"")
+	}
+	// branch_prefix becomes part of a git ref and of ${BRANCH}: no option-like
+	// leading dash, no whitespace, no interpolation markers, nothing git refuses.
+	if bp := s.Workspace.BranchPrefix; bp != "" && !validBranchPrefix(bp) {
+		add("/workspace/branch_prefix", "invalid", "branch_prefix must be a plain ref prefix: no leading '-', whitespace, '${', '..', '~', '^', ':', '?', '*', '[', '\\' or '@{'")
 	}
 
 	if esc := s.Workspace.Materialise.Escape; esc != "" {
@@ -164,6 +170,9 @@ func Validate(s *Spec) []Issue {
 		default:
 			add(base+"/probe", "unsupported", "unknown probe kind "+p.Probe+"; want http or command")
 		}
+		if p.TimeoutS < 0 {
+			add(base+"/timeout_s", "invalid", "timeout_s must be at least 1 when set")
+		}
 	}
 
 	if h := s.Workspace.Materialise.Hooks; h != nil {
@@ -196,6 +205,9 @@ func Validate(s *Spec) []Issue {
 		if r.MaxDepth < 0 {
 			add(base+"/max_depth", "invalid", "max_depth cannot be negative")
 		}
+		if r.ContextBudgetTokens < 0 {
+			add(base+"/context_budget_tokens", "invalid", "context_budget_tokens must be at least 1 when set")
+		}
 	}
 
 	if s.Budgets != nil {
@@ -204,8 +216,34 @@ func Validate(s *Spec) []Issue {
 		default:
 			add("/budgets/on_exceed", "unsupported", "on_exceed must be drain or kill, got "+s.Budgets.OnExceed)
 		}
+		if s.Budgets.PerAgentUSD < 0 {
+			add("/budgets/per_agent_usd", "invalid", "per_agent_usd cannot be negative")
+		}
+		if s.Budgets.PerRunUSD < 0 {
+			add("/budgets/per_run_usd", "invalid", "per_run_usd cannot be negative")
+		}
+		if s.Budgets.PerAgentWallclockMin < 0 {
+			add("/budgets/per_agent_wallclock_min", "invalid", "per_agent_wallclock_min must be at least 1 when set")
+		}
+	}
+	if s.Exits != nil && s.Exits.NoProgressRepeats < 0 {
+		add("/exits/no_progress_repeats", "invalid", "no_progress_repeats must be at least 1 when set")
 	}
 	return out
+}
+
+// validBranchPrefix admits the ref prefixes git accepts that cannot be read as
+// an option, whitespace, or an interpolation marker.
+func validBranchPrefix(p string) bool {
+	if strings.HasPrefix(p, "-") || strings.Contains(p, "${") || strings.Contains(p, "..") || strings.Contains(p, "@{") {
+		return false
+	}
+	for _, r := range p {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune("~^:?*[\\", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // undeclaredVars reports ${VAR} references that resolve against nothing. The

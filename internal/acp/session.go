@@ -96,7 +96,7 @@ type Session struct {
 	readErr  error // read only after readDone closes
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
-	w        *bufio.Writer
+	writeErr error    // first stdin write failure; the stream is desynced after it. Guarded by writeMu.
 	cap      *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
 
 	decisionMu sync.Mutex // serializes permission decisions, cancellation, and new prompt admission
@@ -195,7 +195,6 @@ func start(ctx context.Context, id, agent, cwd string, cmd *exec.Cmd, resumeID s
 		stdout:    stdoutPipe,
 		readDone:  make(chan struct{}),
 		stdin:     stdinPipe,
-		w:         bufio.NewWriter(stdinPipe),
 		pending:   make(map[string]chan *Envelope),
 		perms:     make(map[string]*pendingPerm),
 	}
@@ -351,7 +350,7 @@ func (s *Session) dispatchFrame(env *Envelope, raw []byte) {
 		if ch != nil {
 			ch <- env
 		}
-	case env.hasID() && strings.HasPrefix(env.Method, "session/request_permission"):
+	case env.hasID() && env.Method == "session/request_permission":
 		s.handlePermissionRequest(env, raw)
 	case env.hasID():
 		// An agent->client request we do not implement (fs reads, terminal…).
@@ -426,9 +425,6 @@ func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string)
 	rpcID := append(json.RawMessage(nil), p.rpcID...)
 	s.mu.Unlock()
 
-	if optionID == "" {
-		return fmt.Errorf("no option for outcome %q", outcome)
-	}
 	if err := s.write(Envelope{JSONRPC: "2.0", ID: rpcID, Result: permissionResult("selected", optionID)}); err != nil {
 		return err
 	}
@@ -517,7 +513,6 @@ func (s *Session) closeFiles() {
 	// Flush/close the child pipe under writeMu (write() uses it too — different
 	// lock from s.mu, so take it here to avoid racing a late Cancel/RespondPermission).
 	s.writeMu.Lock()
-	_ = s.w.Flush()
 	_ = s.stdin.Close()
 	s.writeMu.Unlock()
 	s.capMu.Lock()
@@ -525,11 +520,6 @@ func (s *Session) closeFiles() {
 		_ = s.cap.Close()
 	}
 	s.capMu.Unlock()
-}
-
-// request sends a request and waits for its response up to timeout.
-func (s *Session) request(method string, params any, timeout time.Duration) (*Envelope, error) {
-	return s.requestContext(context.Background(), method, params, timeout)
 }
 
 func (s *Session) requestContext(ctx context.Context, method string, params any, timeout time.Duration) (*Envelope, error) {
@@ -589,7 +579,21 @@ func (s *Session) sendRequest(method string, params any) (<-chan *Envelope, func
 	return ch, cleanup, nil
 }
 
+// ErrStdinFaulted marks a session whose agent stopped draining stdin: a bounded
+// write timed out mid-line, the framing is unrecoverable, and the child has been
+// killed so its exit path can report the fault instead of leaving a session that
+// can neither be cancelled nor answered. Errors carry both this sentinel and the
+// original failure in their unwrap chain.
+var ErrStdinFaulted = errors.New("agent stopped reading stdin")
+
 // write serializes one frame out and captures it before the bytes hit the pipe.
+// The write is bounded so a stalled agent cannot pin a control lock; the first
+// failure latches, kills the child, and every later write reports the fault.
+//
+// Fail-stop is deliberate: an agent that is merely slow for a second loses its
+// session too. The alternative, resuming a half-written line later, would hand
+// the agent interleaved frames; a clean kill with a recorded reason is the
+// honest outcome, and real agents drain stdin on a dedicated reader.
 func (s *Session) write(env Envelope) error {
 	line, err := json.Marshal(env)
 	if err != nil {
@@ -598,15 +602,28 @@ func (s *Session) write(env Envelope) error {
 	s.logFrame("c>a", line)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.writeErr != nil {
+		return fmt.Errorf("%w: %w", ErrStdinFaulted, s.writeErr)
+	}
 	if pipe, ok := s.stdin.(*os.File); ok {
 		if err := pipe.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			return err
 		}
 	}
-	if _, err := s.w.Write(append(line, '\n')); err != nil {
-		return err
+	if _, err := s.stdin.Write(append(line, '\n')); err != nil {
+		s.writeErr = err
+		s.Kill()
+		return fmt.Errorf("%w: %w", ErrStdinFaulted, err)
 	}
-	return s.w.Flush()
+	return nil
+}
+
+// WriteError reports the latched stdin fault, if any. Valid at any time; the
+// exit callback records it alongside the exit code.
+func (s *Session) WriteError() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.writeErr
 }
 
 // logFrame appends one wrapped frame to the event log. Capture happens BEFORE
@@ -615,11 +632,23 @@ func (s *Session) logFrame(dir string, frame []byte) {
 	if s.cap == nil {
 		return
 	}
-	rec, _ := json.Marshal(struct {
-		At    string          `json:"at"`
-		Dir   string          `json:"dir"`
-		Frame json.RawMessage `json:"frame"`
-	}{time.Now().UTC().Format(time.RFC3339Nano), dir, json.RawMessage(frame)})
+	// A line that is not JSON (an agent's debug print, a banner) is captured
+	// as text: encoding/json refuses an invalid RawMessage and the frame would
+	// otherwise vanish from the replay artifact, contradicting capture-first.
+	var rec []byte
+	if json.Valid(frame) {
+		rec, _ = json.Marshal(struct {
+			At    string          `json:"at"`
+			Dir   string          `json:"dir"`
+			Frame json.RawMessage `json:"frame"`
+		}{time.Now().UTC().Format(time.RFC3339Nano), dir, json.RawMessage(frame)})
+	} else {
+		rec, _ = json.Marshal(struct {
+			At  string `json:"at"`
+			Dir string `json:"dir"`
+			Raw string `json:"raw"`
+		}{time.Now().UTC().Format(time.RFC3339Nano), dir, string(frame)})
+	}
 	// Reader goroutine (a>c) and writer path (c>a) both log — serialize so lines
 	// never interleave and corrupt the JSONL replay artifact.
 	s.capMu.Lock()

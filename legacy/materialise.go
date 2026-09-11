@@ -3,6 +3,7 @@ package legacy
 import (
 	"flag"
 	"fmt"
+	"github.com/NakliTechie/continuum/internal/config"
 	"os"
 	"path/filepath"
 
@@ -12,14 +13,13 @@ import (
 )
 
 // cmdMaterialise runs one workspace's materialisation, or — with --dry-run —
-// prints the plan it would run without touching the box. The dry run is what the
-// browser shows before a launch is committed, and what the golden-file test
-// compares against.
+// prints the plan it would run without touching the box. This CLI is the only
+// caller today; the golden-file test compares its dry-run output.
 func cmdMaterialise(args []string) {
 	fs := flag.NewFlagSet("materialise", flag.ExitOnError)
 	specPath := fs.String("spec", "fleet.json", "path to the fleet spec")
 	name := fs.String("name", "w1", "workspace name")
-	repo := fs.String("repo", ".", "repository root the workspace is cut from")
+	repo := fs.String("repo", "", "repository root the workspace is cut from (default: the spec's repo, relative to the spec file)")
 	home := fs.String("home", "", "relay home (default ~/.menagerie)")
 	dry := fs.Bool("dry-run", false, "print the plan; allocate nothing, write nothing, run nothing")
 	_ = fs.Parse(args)
@@ -38,11 +38,14 @@ func cmdMaterialise(args []string) {
 
 	h := *home
 	if h == "" {
-		hd, err := os.UserHomeDir()
+		hd, err := config.HomeDir()
 		if err != nil {
 			fatal(err)
 		}
-		h = filepath.Join(hd, ".menagerie")
+		h = hd
+	}
+	if *repo == "" {
+		*repo = filepath.Join(filepath.Dir(*specPath), spec.Repo)
 	}
 	repoAbs, err := filepath.Abs(*repo)
 	if err != nil {

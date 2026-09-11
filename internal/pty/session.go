@@ -3,6 +3,7 @@ package pty
 
 import (
 	"fmt"
+	"github.com/NakliTechie/continuum/internal/config"
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
@@ -19,11 +20,11 @@ import (
 
 // SessionsDir is ~/.menagerie/sessions, where raw PTY byte streams are captured.
 func SessionsDir() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".menagerie", "sessions"), nil
+	return filepath.Join(dir, "sessions"), nil
 }
 
 // Session is a running agent attached to a PTY.
@@ -256,7 +257,14 @@ func (s *Session) read(b []byte) (int, error) {
 }
 
 // Resize never changes descriptor blocking mode through os.File.Fd.
+// MaxDimension bounds any requested terminal size; the kernel takes uint16 and
+// a wrapped zero would hand the child a zero-column terminal.
+const MaxDimension = 1000
+
 func (s *Session) Resize(cols, rows int) error {
+	if cols < 1 || cols > MaxDimension || rows < 1 || rows > MaxDimension {
+		return fmt.Errorf("resize %dx%d: dimensions must be within 1..%d", cols, rows, MaxDimension)
+	}
 	s.termMu.Lock()
 	defer s.termMu.Unlock()
 	if s.term != nil {

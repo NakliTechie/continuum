@@ -2,8 +2,8 @@
 # workspace w1 on branch agent/w1
 ports     allocate  PORT=4000
 ports     allocate  DB_PORT=5500
-files     copy      .env.local   [skipped: dry run]
-files     render    .env   [skipped: dry run]
+files     copy      ../.env.local -> .env.local   [skipped: dry run]
+files     render    .env.workspace.tmpl -> .env   [skipped: dry run]
 commands  run       npm ci --prefer-offline   [skipped: dry run]
 commands  run       npm run db:seed   [skipped: dry run]
 services  start     postgres   [skipped: dry run]

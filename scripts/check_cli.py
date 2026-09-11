@@ -42,7 +42,10 @@ def main():
                 if process.poll() is not None:
                     raise AssertionError('daemon exited before ready')
                 if (state / 'endpoint').exists():
-                    probe = subprocess.run([str(binary), 'status', '--state', str(state), '--json'], env=env, capture_output=True, timeout=2)
+                    try:
+                        probe = subprocess.run([str(binary), 'status', '--state', str(state), '--json'], env=env, capture_output=True, timeout=2)
+                    except subprocess.TimeoutExpired:
+                        continue  # a hung probe must not orphan the daemon; the deadline kills it
                     if probe.returncode == 0:
                         return process
                 time.sleep(.02)
@@ -92,12 +95,19 @@ def main():
 
             # Child emits only after all clients have disconnected.
             trigger = root / 'trigger'
-            shell = 'while [ ! -f "$1" ]; do sleep 0.02; done; printf "offline-marker\\n"; exec /bin/cat'
+            # The marker rides inside a clipboard OSC and a colour SGR: --text keeps
+            # the text and colour, drops the OSC; --raw replays every byte.
+            shell = ('while [ ! -f "$1" ]; do sleep 0.02; done; '
+                     'printf "\\033]52;c;c2VjcmV0\\007\\033[1;32moffline-marker\\033[0m\\n"; exec /bin/cat')
             offline = rpc('open', '--cwd', str(root), '--', '/bin/sh', '-c', shell, 'test-shell', str(trigger))['result']
             trigger.touch()
             time.sleep(.15)
             replay = cli('events', '--block', offline['block_id'], '--text').stdout
-            assert b'offline-marker' in replay
+            assert b'\x1b[1;32moffline-marker\x1b[0m' in replay, replay
+            assert b']52;' not in replay and b'c2VjcmV0' not in replay, replay
+            raw = cli('events', '--block', offline['block_id'], '--raw').stdout
+            assert b'\x1b]52;c;c2VjcmV0\x07' in raw, raw
+            cli('events', '--block', offline['block_id'], '--text', '--raw', code=2)
             assert any(b['pid'] == offline['pid'] for b in rpc('status')['result']['blocks'])
 
             rpc('resize', '--block', block, '--cols', '120', '--rows', '40')

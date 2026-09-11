@@ -119,12 +119,19 @@ func requireSafePath(what, p string) {
 	}
 }
 
+// systemdQuoted renders a path for a double-quoted systemd command-line
+// argument: backslash and double quote are escaped, and % and $ — which
+// systemd would expand as specifiers and variables — are doubled and escaped.
+func systemdQuoted(p string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`, `$`, `$$`).Replace(p)
+}
+
 func menagerieDir() string {
-	home, err := os.UserHomeDir()
+	dir, err := config.HomeDir()
 	if err != nil {
 		fatal(err)
 	}
-	return filepath.Join(home, ".menagerie")
+	return dir
 }
 
 func serviceInstall(path string) {
@@ -212,7 +219,7 @@ RestartSec=2
 
 [Install]
 WantedBy=default.target
-`, bin)
+`, systemdQuoted(bin))
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		fatal(err)
 	}

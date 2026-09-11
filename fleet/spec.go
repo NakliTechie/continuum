@@ -12,6 +12,9 @@ const SpecVersion = "menagerie.fleet.v1"
 type Spec struct {
 	Spec string `json:"spec"`
 	Name string `json:"name"`
+	// Repo locates the repository the spec describes, relative to the spec
+	// file ("." for the spec's own repo). `legacy materialise` resolves its
+	// default --repo from it; an explicit --repo overrides it.
 	Repo string `json:"repo"`
 	// Topology is required and has no default. The handoff's reasoning: roughly
 	// four in five multi-agent failures are specification and coordination
@@ -119,6 +122,11 @@ type Probe struct {
 
 // Teardown reverses materialisation. KeepBranch defaults to false only when the
 // block is present and says so; a missing Teardown keeps the branch.
+//
+// DECLARED but not yet executed, like hooks.on_stop/on_destroy: no code in this
+// module runs teardown.commands or acts on keep_branch until the teardown
+// executor lands (C5). A `docker compose down -v` written here passes review
+// and does nothing, so the gap is stated rather than left to be discovered.
 type Teardown struct {
 	Commands   []string `json:"commands,omitempty"`
 	KeepBranch bool     `json:"keep_branch,omitempty"`

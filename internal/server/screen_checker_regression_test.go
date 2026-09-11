@@ -140,7 +140,7 @@ func TestCheckerRetentionEvictsOnlyOldestAndKeepsIdentity(t *testing.T) {
 	}
 }
 
-func TestCheckerScreenInitialSizeWithTmuxEnabled(t *testing.T) {
+func TestCheckerScreenBypassesTmuxWhenEnabled(t *testing.T) {
 	m := checkerModern(t)
 	dir := t.TempDir()
 	log := filepath.Join(dir, "tmux-size.log")
@@ -176,14 +176,9 @@ esac
 	if res.Class != "ok" {
 		t.Fatalf("unexpected open error: %+v", res)
 	}
-	b, err := os.ReadFile(log)
-	if os.IsNotExist(err) {
-		return
-	} // Bypassing tmux for screen-v1 is also acceptable.
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != "90 30\n" {
-		t.Fatalf("screen-v1 child launch via tmux used %q; requested 90 30", strings.TrimSpace(string(b)))
+	// screen-v1 owns the child directly: a PTY through tmux would replace the
+	// engine's screen with tmux's. The fake tmux must never have been invoked.
+	if b, err := os.ReadFile(log); !os.IsNotExist(err) {
+		t.Fatalf("screen-v1 launch went through tmux (size log %q, err %v); the engine must own the PTY", strings.TrimSpace(string(b)), err)
 	}
 }

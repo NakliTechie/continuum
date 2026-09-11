@@ -1,11 +1,11 @@
 package acp
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -16,7 +16,7 @@ func TestAuditKillDrainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Session{stdin: f, w: bufio.NewWriter(f), cmd: exec.Command("true"), pending: map[string]chan *Envelope{"1": ch}}
+	s := &Session{stdin: f, cmd: exec.Command("true"), pending: map[string]chan *Envelope{"1": ch}}
 	s.Kill()
 	s.closeFiles()
 	select {
@@ -65,5 +65,37 @@ func TestAuditReplayOrder(t *testing.T) {
 	<-liveDone
 	if len(seen) != 3 || seen[1] != "old2" {
 		t.Fatalf("replay reordered: %v", seen)
+	}
+}
+
+// Capture happens before interpretation: a line the agent writes that is not
+// JSON must still land in the replay artifact, as text, instead of vanishing
+// because encoding/json refused it as a RawMessage.
+func TestLogFrameKeepsNonJSONLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cap.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Session{cap: f}
+	s.logFrame("a>c", []byte(`{"jsonrpc":"2.0","method":"session/update"}`))
+	s.logFrame("a>c", []byte(`warning: agent booted with debug output`))
+	f.Close()
+	b, _ := os.ReadFile(path)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected two records, got %q", b)
+	}
+	var second map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("second record is not JSON: %v %q", err, lines[1])
+	}
+	if second["raw"] != "warning: agent booted with debug output" || second["dir"] != "a>c" {
+		t.Fatalf("non-JSON line not captured as text: %v", second)
+	}
+	var first map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &first)
+	if _, ok := first["frame"].(map[string]any); !ok {
+		t.Fatalf("JSON frame not captured as a frame: %v", first)
 	}
 }

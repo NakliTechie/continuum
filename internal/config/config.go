@@ -4,23 +4,38 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 )
 
-// DefaultPath is ~/.menagerie/relay.toml.
-func DefaultPath() (string, error) {
+// HomeDir is the legacy relay's state directory, ~/.menagerie: config,
+// captures, workspace records, service log. Every path under it derives from
+// here so a move touches one function.
+func HomeDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".menagerie", "relay.toml"), nil
+	return filepath.Join(home, ".menagerie"), nil
+}
+
+// DefaultPath is ~/.menagerie/relay.toml.
+func DefaultPath() (string, error) {
+	dir, err := HomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "relay.toml"), nil
 }
 
 // Agent is a configured agent the relay can spawn.
@@ -87,8 +102,17 @@ func (a Agent) ACPArgsOrDefault() []string {
 type Config struct {
 	// sourcePath is immutable after Load; only registration authority reloads.
 	sourcePath string
+	// The last decoded registration token and the file identity it came
+	// from; guarded by tokenMu. See CurrentRegistrationToken.
+	tokenMu     sync.Mutex
+	tokenCached bool
+	tokenFile   fileID
+	tokenValue  string
 
-	// CaptureDir is a programmatic override; nil retains legacy capture behavior.
+	// CaptureDir is a programmatic override. nil means: a file-loaded legacy
+	// config keeps Menagerie's home capture directory; a programmatic config
+	// captures nothing (server.New disables it), so tests and embedders never
+	// write into the installed relay's directory by omission.
 	CaptureDir        *string          `toml:"-"`
 	Name              string           `toml:"name"`
 	Listen            string           `toml:"listen"`
@@ -218,10 +242,14 @@ func isLoopbackOrigin(origin string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// Load reads a config from path.
+// Load reads a config from path. The file holds the registration secret, so
+// a mode that lets other users read it is refused rather than served.
 func Load(path string) (*Config, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := requirePrivate(abs); err != nil {
 		return nil, err
 	}
 	var c Config
@@ -232,12 +260,50 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// requirePrivate refuses a config file readable by group or others. Save
+// writes 0600; a hand-made 0644 file would otherwise expose the token with
+// no warning, unlike the modern private-state credentials.
+func requirePrivate(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is readable by other users (mode %04o); it holds the registration token, run: chmod 600 %s", path, info.Mode().Perm(), path)
+	}
+	return nil
+}
+
 // CurrentRegistrationToken reads current registration authority for a loaded
 // legacy config. Read/decode failures are errors, never a fallback to a revoked
 // startup token. Programmatic modern/test configs retain their explicit token.
+// FromFile reports whether Load produced this config. Programmatic configs
+// carry no source path and no implicit capture directory.
+func (c *Config) FromFile() bool { return c.sourcePath != "" }
+
 func (c *Config) CurrentRegistrationToken() (string, error) {
 	if c.sourcePath == "" {
 		return c.RegistrationToken, nil
+	}
+	// Called before every frame a legacy connection writes. Decoding the
+	// file each time cost a read plus a TOML parse per output chunk per
+	// viewer; the file is only ever replaced whole (rename), so its identity
+	// (inode, size, mtime) tells whether the last decode is still current.
+	info, err := os.Stat(c.sourcePath)
+	if err != nil {
+		return "", err
+	}
+	if err := requirePrivate(c.sourcePath); err != nil {
+		return "", err
+	}
+	id := fileIdentity(info)
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.tokenCached && c.tokenFile == id {
+		return c.tokenValue, nil
 	}
 	var current struct {
 		RegistrationToken string `toml:"registration_token"`
@@ -245,7 +311,26 @@ func (c *Config) CurrentRegistrationToken() (string, error) {
 	if _, err := toml.DecodeFile(c.sourcePath, &current); err != nil {
 		return "", err
 	}
+	c.tokenCached, c.tokenFile, c.tokenValue = true, id, current.RegistrationToken
 	return current.RegistrationToken, nil
+}
+
+type fileID struct {
+	size  int64
+	mtime int64
+	ctime int64
+	inode uint64
+}
+
+// fileIdentity folds in the inode change time as well: an in-place edit that
+// restores the mtime still moves ctime, which no unprivileged process can set.
+func fileIdentity(info os.FileInfo) fileID {
+	id := fileID{size: info.Size(), mtime: info.ModTime().UnixNano()}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		id.inode = st.Ino
+		id.ctime = statCtime(st)
+	}
+	return id
 }
 
 // Save writes a config to path, creating the parent dir with 0700 and the file
@@ -260,17 +345,96 @@ func Save(path string, c *Config) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	defer f.Close()
-	if err := toml.NewEncoder(f).Encode(c); err != nil {
-		return err
+	err = toml.NewEncoder(f).Encode(c)
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
-	if err := f.Close(); err != nil {
+	if err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), path)
+}
+
+// RotateToken replaces only the registration_token line of the file at path,
+// keeping every other key, comment and line the operator put there; a file
+// without that line is re-encoded whole. The write is atomic like Save's.
+func RotateToken(path string, c *Config, token string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	quoted, err := tomlString(token)
+	if err != nil {
+		return err
+	}
+	// Only the top-level key, on one line, is rewritten in place: a
+	// registration_token inside some [table] is a different key, and a
+	// multi-line string cannot be swapped line by line. Anything else is
+	// re-encoded whole, which is what Save always did.
+	lines := strings.Split(string(raw), "\n")
+	found := false
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "[") {
+			break // the top-level section has ended
+		}
+		if !tokenLine.MatchString(l) {
+			continue
+		}
+		value := strings.TrimSpace(strings.SplitN(l, "=", 2)[1])
+		if strings.HasPrefix(value, `"""`) || strings.HasPrefix(value, "'''") {
+			break // multi-line value: fall back to a full rewrite
+		}
+		lines[i] = "registration_token = " + quoted
+		found = true
+		break
+	}
+	if !found {
+		c.RegistrationToken = token
+		return Save(path, c)
+	}
+	out := []byte(strings.Join(lines, "\n"))
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(out)
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// The line scan is textual; the parser is the judge. A rewrite that does
+	// not load back with the new token (a decoy line inside a multi-line
+	// string, say) is discarded for a full re-encode rather than announced.
+	if check, err := Load(f.Name()); err != nil || check.RegistrationToken != token {
+		c.RegistrationToken = token
+		return Save(path, c)
+	}
+	return os.Rename(f.Name(), path)
+}
+
+var tokenLine = regexp.MustCompile(`^[ \t]*registration_token[ \t]*=`)
+
+// tomlString renders a TOML basic string through the encoder so escaping
+// follows the same rules Save uses.
+func tomlString(v string) (string, error) {
+	var b strings.Builder
+	if err := toml.NewEncoder(&b).Encode(struct {
+		V string `toml:"v"`
+	}{v}); err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(b.String())
+	return strings.TrimSpace(strings.TrimPrefix(line, "v =")), nil
 }
 
 // Exists reports whether a config file is present at path.

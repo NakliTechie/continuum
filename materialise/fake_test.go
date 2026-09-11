@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// RecordingExecutor runs nothing and remembers everything. It is the seam the
-// dry run (C3) and the tests share: a run against it proves the graph's shape
-// without touching the box.
+// RecordingExecutor runs nothing and remembers everything. It is the tests'
+// seam for proving a graph's shape without touching the box. The dry run does
+// not use it: Engine.DryRun short-circuits before any executor call.
 type RecordingExecutor struct {
 	mu   sync.Mutex
 	Runs []string
@@ -65,7 +65,7 @@ func (f *RecordingFS) ReadFile(p string) ([]byte, error) {
 	if b, ok := f.Writes[p]; ok {
 		return b, nil
 	}
-	return nil, fmt.Errorf("no such file (fake): %s", p)
+	return nil, fmt.Errorf("no such file (fake): %s: %w", p, fs.ErrNotExist)
 }
 
 func (f *RecordingFS) WriteFile(p string, b []byte, _ fs.FileMode) error {
@@ -91,6 +91,9 @@ type FailProber struct{}
 func (FailProber) HTTP(url string, _ time.Duration) error {
 	return fmt.Errorf("probe failed (fake): %s", url)
 }
+
+// Resolve follows no links: the fake has none, so a path is where it says.
+func (f *RecordingFS) Resolve(p string) (string, error) { return filepath.Clean(p), nil }
 
 func (f *RecordingFS) WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error {
 	return f.WriteFile(filepath.Join(root, relative), b, perm)

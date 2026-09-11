@@ -22,12 +22,15 @@ func TestIDFromNameRejectsForeign(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"claude":       "claude",         // bare word untouched
-		"":             "''",             // empty -> ''
-		"echo hi":      "'echo hi'",      // space
-		"a;b":          "'a;b'",          // shell metachar
-		"it's":         `'it'\''s'`,      // embedded single quote
-		"--flag=value": "'--flag=value'", // '=' is quoted (belt-and-suspenders)
+		"claude":        "claude",          // bare word untouched
+		"":              "''",              // empty -> ''
+		"echo hi":       "'echo hi'",       // space
+		"a;b":           "'a;b'",           // shell metachar
+		"it's":          `'it'\''s'`,       // embedded single quote
+		"--flag=value":  "'--flag=value'",  // '=' is quoted (belt-and-suspenders)
+		"--files={a,b}": "'--files={a,b}'", // braces/commas would brace-expand
+		"{1..3}":        "'{1..3}'",
+		"a^b":           "'a^b'",
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://menagerie.naklitechie.com/schema/menagerie.fleet.v1.json",
   "title": "menagerie.fleet.v1",
-  "description": "A fleet spec: one file per repo, committed. The browser edits it; the relay executes it. Authoritative validation lives in relay-go/fleet (Go) and is mirrored in index.html; this document is the published contract.",
+  "description": "A fleet spec: one file per repo, committed. The browser edits it; the relay executes it. Authoritative validation lives in fleet/ (Go) and is mirrored in index.html; this document is the published contract.",
   "type": "object",
   "required": [
     "spec",
@@ -94,7 +94,8 @@
                 ],
                 "properties": {
                   "from": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Path to copy, relative to the checkout. May name a file inside the checkout or directly beside it (../.env.local); symlinks are resolved first and anything else is refused at materialise time."
                   },
                   "template": {
                     "type": "string"
@@ -225,6 +226,7 @@
         },
         "teardown": {
           "type": "object",
+          "description": "DECLARED, NOT EXECUTED yet: nothing runs teardown.commands or acts on keep_branch until the teardown executor lands (C5), the same status as hooks.on_stop/on_destroy.",
           "properties": {
             "commands": {
               "type": "array",

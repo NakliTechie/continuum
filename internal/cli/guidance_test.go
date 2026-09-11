@@ -49,6 +49,30 @@ func TestAttachDumbRefusesBeforeControl(t *testing.T) {
 		t.Fatal(s.diag.String())
 	}
 }
+
+// --takeover sends the explicit takeover operation, never acquire, so an
+// occupied block is replaced rather than refused; the session then runs as a
+// controller and releases on detach.
+func TestAttachTakeoverReplacesAnOccupiedController(t *testing.T) {
+	dir, f := newAttachFixture(t)
+	f.mu.Lock()
+	f.controlled = true // acquire would be refused; takeover must not be
+	f.mu.Unlock()
+	s := startTakeover(t, dir)
+	waitFor(t, "controller frame", func() bool { return strings.Contains(s.output.String(), "Ctrl-] detach • Control") })
+	s.master.Write([]byte{0x1d})
+	s.finished(t, 0)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ops := map[string]int{}
+	for _, q := range f.requests {
+		ops[q.Operation]++
+	}
+	if ops["takeover"] != 1 || ops["acquire"] != 0 || ops["release"] != 1 {
+		t.Fatalf("takeover journey issued %v", ops)
+	}
+}
+
 func TestAttachOccupiedControlHintsUseAttach(t *testing.T) {
 	dir, f := newAttachFixture(t)
 	f.mu.Lock()
@@ -102,12 +126,21 @@ func TestAttachNarrowControlsAndTinyRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "essential cropped footer", func() bool { return strings.Contains(s.output.String(), "Ctrl-] detach • Observer • cropped") })
+	// A transient shrink below the minimum shows why nothing is drawn and keeps
+	// the session; growing back resumes frames, and Ctrl-] still detaches.
 	if err := creackpty.Setsize(s.master, &creackpty.Winsize{Cols: 20, Rows: 6}); err != nil {
 		t.Fatal(err)
 	}
-	s.finished(t, 2)
-	if !strings.Contains(s.diag.String(), "40 columns") {
-		t.Fatal(s.diag.String())
+	waitFor(t, "too-small notice", func() bool { return strings.Contains(s.output.String(), "Terminal too small") })
+	before := len(s.output.String())
+	if err := creackpty.Setsize(s.master, &creackpty.Winsize{Cols: 40, Rows: 10}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frames resume", func() bool { return strings.Contains(s.output.String()[before:], "ATTACH_READY") })
+	s.master.Write([]byte{0x1d})
+	s.finished(t, 0)
+	if strings.Contains(s.diag.String(), "40 columns") {
+		t.Fatalf("shrink ended the session: %s", s.diag.String())
 	}
 }
 func TestAttachHelpIsScoped(t *testing.T) {

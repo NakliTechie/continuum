@@ -44,7 +44,7 @@ The automated gate covers the core with Go's race detector, a real CLI journey a
 
 ### Build and try
 
-Requires Go 1.26.2; verification also uses Python 3 and Git.
+Requires Go 1.26.8 (older 1.26 releases carry stdlib advisories reachable from this module); verification also uses Python 3, Git and, when installed, govulncheck.
 
 ```sh
 go build -o bin/continuum ./cmd/continuum
@@ -68,7 +68,7 @@ Use the block ID returned by `open`. A second `events` command joins as an obser
 
 Metadata and retained history survive restart; processes do not in this alpha. Recovered active records become `interrupted`. History from an unclean daemon epoch is conservatively marked incomplete, including exited blocks; the event API returns an `indeterminate` envelope with the retained events. Retention-expired cursors return `history_gap` and the available range. Fresh work after recovery has its own complete/incomplete record. A storage writer failure refuses further durable mutations. A fault in one ACP reader marks that block’s history incomplete without disabling unrelated controls.
 
-Content recording is enabled by default, bounded to 16 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also caps recorded blocks at 1024 and operation identities at 4096. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB; `--text` emits terminal control bytes and is for trusted output. JSON/NDJSON retains encoded payloads. Experimental interactive terminal attachment is available for the opt-in screen-v1 profile below.
+Content recording is enabled by default, bounded to 16 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also keeps at most 1024 recorded blocks, retiring the oldest exited or interrupted block (with its retained events) when a new one needs room; only a host with 1024 active blocks refuses an open. Duplicate-request reconciliation retains at most 4096 operation identities, retiring the oldest resolved ones first; a retry of a retired request executes again rather than replaying its saved result. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB. `events --text` shows printable text and colour only; clipboard, title, query and screen-mode sequences an agent's output may carry are dropped before they reach your terminal. `events --raw` replays the exact bytes and is for trusted output redirected to a file. JSON/NDJSON retains encoded payloads. Experimental interactive terminal attachment is available for the opt-in screen-v1 profile below.
 
 ### Experimental interactive terminals
 
