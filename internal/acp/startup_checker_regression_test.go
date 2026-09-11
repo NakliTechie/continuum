@@ -1,11 +1,11 @@
 package acp
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -229,7 +229,7 @@ func TestCheckerEstablishedPermissionOverflowReaps(t *testing.T) {
 }
 func TestCheckerSinkReplacementNilAndConcurrentDelivery(t *testing.T) {
 	var output bytes.Buffer
-	s := &Session{perms: map[string]*pendingPerm{}, w: bufio.NewWriter(&output)}
+	s := &Session{perms: map[string]*pendingPerm{}, stdin: nopWriteCloser{&output}}
 	var updates, perms atomic.Int32
 	u := func(json.RawMessage) { updates.Add(1) }
 	p := func(id string, _ json.RawMessage) {
@@ -296,3 +296,8 @@ func TestCheckerExactStartupLimits(t *testing.T) {
 		}
 	})
 }
+
+// nopWriteCloser stands in for the agent's stdin pipe in unit tests.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }

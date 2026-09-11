@@ -96,7 +96,7 @@ type Session struct {
 	readErr  error // read only after readDone closes
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
-	w        *bufio.Writer
+	writeErr error    // first stdin write failure; the stream is desynced after it. Guarded by writeMu.
 	cap      *os.File // event log: ~/.menagerie/sessions/<id>.acp.jsonl
 
 	decisionMu sync.Mutex // serializes permission decisions, cancellation, and new prompt admission
@@ -195,7 +195,6 @@ func start(ctx context.Context, id, agent, cwd string, cmd *exec.Cmd, resumeID s
 		stdout:    stdoutPipe,
 		readDone:  make(chan struct{}),
 		stdin:     stdinPipe,
-		w:         bufio.NewWriter(stdinPipe),
 		pending:   make(map[string]chan *Envelope),
 		perms:     make(map[string]*pendingPerm),
 	}
@@ -517,7 +516,6 @@ func (s *Session) closeFiles() {
 	// Flush/close the child pipe under writeMu (write() uses it too — different
 	// lock from s.mu, so take it here to avoid racing a late Cancel/RespondPermission).
 	s.writeMu.Lock()
-	_ = s.w.Flush()
 	_ = s.stdin.Close()
 	s.writeMu.Unlock()
 	s.capMu.Lock()
@@ -589,7 +587,21 @@ func (s *Session) sendRequest(method string, params any) (<-chan *Envelope, func
 	return ch, cleanup, nil
 }
 
+// ErrStdinFaulted marks a session whose agent stopped draining stdin: a bounded
+// write timed out mid-line, the framing is unrecoverable, and the child has been
+// killed so its exit path can report the fault instead of leaving a session that
+// can neither be cancelled nor answered. Errors carry both this sentinel and the
+// original failure in their unwrap chain.
+var ErrStdinFaulted = errors.New("agent stopped reading stdin")
+
 // write serializes one frame out and captures it before the bytes hit the pipe.
+// The write is bounded so a stalled agent cannot pin a control lock; the first
+// failure latches, kills the child, and every later write reports the fault.
+//
+// Fail-stop is deliberate: an agent that is merely slow for a second loses its
+// session too. The alternative, resuming a half-written line later, would hand
+// the agent interleaved frames; a clean kill with a recorded reason is the
+// honest outcome, and real agents drain stdin on a dedicated reader.
 func (s *Session) write(env Envelope) error {
 	line, err := json.Marshal(env)
 	if err != nil {
@@ -598,15 +610,28 @@ func (s *Session) write(env Envelope) error {
 	s.logFrame("c>a", line)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.writeErr != nil {
+		return fmt.Errorf("%w: %w", ErrStdinFaulted, s.writeErr)
+	}
 	if pipe, ok := s.stdin.(*os.File); ok {
 		if err := pipe.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			return err
 		}
 	}
-	if _, err := s.w.Write(append(line, '\n')); err != nil {
-		return err
+	if _, err := s.stdin.Write(append(line, '\n')); err != nil {
+		s.writeErr = err
+		s.Kill()
+		return fmt.Errorf("%w: %w", ErrStdinFaulted, err)
 	}
-	return s.w.Flush()
+	return nil
+}
+
+// WriteError reports the latched stdin fault, if any. Valid at any time; the
+// exit callback records it alongside the exit code.
+func (s *Session) WriteError() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.writeErr
 }
 
 // logFrame appends one wrapped frame to the event log. Capture happens BEFORE

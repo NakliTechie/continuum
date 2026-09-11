@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -16,7 +15,7 @@ func TestAuditKillDrainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Session{stdin: f, w: bufio.NewWriter(f), cmd: exec.Command("true"), pending: map[string]chan *Envelope{"1": ch}}
+	s := &Session{stdin: f, cmd: exec.Command("true"), pending: map[string]chan *Envelope{"1": ch}}
 	s.Kill()
 	s.closeFiles()
 	select {

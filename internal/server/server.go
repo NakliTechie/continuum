@@ -1017,6 +1017,12 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 			if err := sess.ReadError(); err != nil {
 				s.recordCaptureLoss(id, err)
 			}
+			if err := sess.WriteError(); err != nil {
+				// The agent stopped draining stdin; the relay killed it so the
+				// session could not linger uncancellable. Say so in the record.
+				s.record(id, "agent_fault", map[string]any{"kind": "stdin_write", "message": err.Error()})
+				log.Printf("agent fault %s: stdin write: %v", id, err)
+			}
 			c := code
 			s.queueStructuredEvent(e, id, protocol.EventExited, &c)
 			s.removeSession(id)
