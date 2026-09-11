@@ -6,4 +6,4 @@ Reach: `continuum help`; start `continuum serve`, then open a command in another
 
 Verify: `python3 scripts/verify.py verify cli` builds the real binary, uses disposable state and checks two viewers, no-client output, duplicate/conflicting launches, auth, process control and crash recovery.
 
-Watch: readiness must probe the API, not trust a stale endpoint file after a crash. Input is UTF-8, at most 64 KiB. Leases last 60 seconds. `--text` decodes untrusted terminal bytes and is opt-in. Following output never owns the process lifetime. Interactive server-frame attachment is covered separately in [Terminal](terminal.md).
+Watch: readiness must probe the API, not trust a stale endpoint file after a crash. Input is UTF-8, at most 64 KiB. Leases last 60 seconds. `--text` decodes untrusted terminal bytes to printable text and colour only; `--raw` is the byte-exact, trusted-output opt-in. Following output never owns the process lifetime. Interactive server-frame attachment is covered separately in [Terminal](terminal.md).

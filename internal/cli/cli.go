@@ -57,7 +57,8 @@ Commands:
 
 Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
   --json (machine envelope), --request-id ID (reuse only for the same mutation).
-Events: --after CURSOR, --follow, --text (decode PTY bytes; trusted output only).
+Events: --after CURSOR, --follow, --text (printable text and colour only),
+  --raw (byte-exact PTY replay including control sequences; trusted output only).
 Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
 Observation: --observer uses the read-only observer credential.
 Terminal: open --terminal screen-v1 -- COMMAND opts into server-owned screens.
@@ -150,7 +151,8 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	cursor := f.String("cursor", "", "status page cursor")
 	after := f.Uint64("after", 0, "history cursor")
 	follow := f.Bool("follow", false, "watch events")
-	plain := f.Bool("text", false, "decode trusted PTY bytes")
+	plain := f.Bool("text", false, "decode PTY bytes as printable text and colour")
+	rawOut := f.Bool("raw", false, "byte-exact PTY replay; trusted output only")
 	observer := f.Bool("observer", false, "read-only credential")
 	request := f.String("request-id", "", "stable mutation ID")
 	cwd := f.String("cwd", "", "working directory")
@@ -201,8 +203,16 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		fmt.Fprintln(diag, "unexpected arguments; use --block ID")
 		return 2
 	}
-	if *plain && (command != "events" || *machine) {
-		fmt.Fprintln(diag, "--text is for events and cannot combine with --json")
+	if (*plain || *rawOut) && (command != "events" || *machine) {
+		fmt.Fprintln(diag, "--text and --raw are for events and cannot combine with --json")
+		return 2
+	}
+	if *plain && *rawOut {
+		fmt.Fprintln(diag, "choose --text (sanitized) or --raw (byte-exact)")
+		return 2
+	}
+	if *rawOut && *block == "" {
+		fmt.Fprintln(diag, "--raw replays one block; use --block ID")
 		return 2
 	}
 	if *follow && command != "events" {
@@ -270,6 +280,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	var sanitizer textFilter // --text: one filter across every page, so split escapes stay caught
 	for {
 		v := call(ctx, *state, *observer, q)
 		if v.Class == "ok" && (command == "acquire" || command == "takeover") {
@@ -307,7 +318,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			return 8
 		}
 		for _, e := range p.Events {
-			if *plain {
+			if *plain || *rawOut {
 				if e.Type == "output" {
 					var data struct {
 						Data string `json:"data"`
@@ -316,6 +327,9 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 					raw, err := base64.StdEncoding.DecodeString(data.Data)
 					if err != nil {
 						return 8
+					}
+					if *plain {
+						raw = sanitizer.Write(raw)
 					}
 					if _, err = out.Write(raw); err != nil {
 						return 5
