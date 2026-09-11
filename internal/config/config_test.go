@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +108,79 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(got.Agents) != len(want.Agents) {
 		t.Errorf("agents count: got %d want %d", len(got.Agents), len(want.Agents))
+	}
+}
+
+// Rotation replaces the token line only: keys this version does not model,
+// comments and the operator's formatting survive.
+func TestRotateTokenKeepsUnknownKeysAndComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.toml")
+	original := "# operator note\nname = \"box\"\nregistration_token = \"old-token\"\nfuture_key = 42\n\n[agents.claude]\ncommand = \"claude\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RotateToken(path, cfg, `new"token\x`); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	got := string(b)
+	for _, keep := range []string{"# operator note", "name = \"box\"", "future_key = 42", "[agents.claude]", "command = \"claude\""} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("rotation dropped %q:\n%s", keep, got)
+		}
+	}
+	if strings.Contains(got, "old-token") {
+		t.Fatalf("old token survived:\n%s", got)
+	}
+	fresh, err := Load(path)
+	if err != nil || fresh.RegistrationToken != `new"token\x` {
+		t.Fatalf("rotated token does not load back: %q %v", fresh.RegistrationToken, err)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("rotated file mode %v", info.Mode())
+	}
+
+	// A same-named key inside a table is a different key and stays untouched;
+	// a multi-line token cannot be swapped in place and falls back to a full
+	// rewrite that still loads.
+	tabled := "registration_token = \"top\"\n\n[future]\nregistration_token = \"nested\"\n"
+	if err := os.WriteFile(path, []byte(tabled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load(path)
+	if err := RotateToken(path, cfg, "rotated"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if !strings.Contains(string(b), "registration_token = \"nested\"") || strings.Contains(string(b), "\"top\"") {
+		t.Fatalf("table key changed or top-level key kept:\n%s", b)
+	}
+	// A decoy key line inside an earlier multi-line string must not be the
+	// one rewritten; the parser check catches what the line scan cannot.
+	decoy := "future_note = \"\"\"\nregistration_token = \"decoy\"\n\"\"\"\nregistration_token = \"old\"\nname = \"box\"\n"
+	if err := os.WriteFile(path, []byte(decoy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load(path)
+	if err := RotateToken(path, cfg, "rotated3"); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, err := Load(path); err != nil || fresh.RegistrationToken != "rotated3" || fresh.Name != "box" {
+		t.Fatalf("decoy line fooled rotation: %+v %v", fresh, err)
+	}
+	multi := "registration_token = \"\"\"\nold\n\"\"\"\nname = \"box\"\n"
+	if err := os.WriteFile(path, []byte(multi), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load(path)
+	if err := RotateToken(path, cfg, "rotated2"); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, err := Load(path); err != nil || fresh.RegistrationToken != "rotated2" || fresh.Name != "box" {
+		t.Fatalf("multi-line fallback did not produce a loadable config: %+v %v", fresh, err)
 	}
 }

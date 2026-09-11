@@ -159,11 +159,14 @@ func (p *Provisioner) ensureWorktree(repoRoot, path, branch string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	args := []string{"worktree", "add", path}
+	// --end-of-options keeps a branch or path that begins with '-' from being
+	// read as a flag; the validator already refuses such prefixes, this is the
+	// enforcement that does not depend on having been validated.
+	args := []string{"worktree", "add"}
 	if branchExists(repoRoot, branch) {
-		args = append(args, branch)
+		args = append(args, "--end-of-options", path, branch)
 	} else {
-		args = append(args, "-b", branch)
+		args = append(args, "-b", branch, "--end-of-options", path)
 	}
 	cmd := workspaceGit(repoRoot, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {

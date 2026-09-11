@@ -4,9 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -74,7 +77,10 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 		// The record gets a locator only; the detail goes to the relay's log, which
 		// is where the sanitised reason points the operator. Without this line that
 		// pointer led nowhere.
-		log.Printf("materialise %s: %s failed: %v", name, where, err)
+		// The log line carries the locator and the error's class, never the
+		// command's output: that output can hold whatever the command printed,
+		// and the relay log is not a private file.
+		log.Printf("materialise %s: %s failed: %s", name, where, errClass(err))
 		if !e.DryRun {
 			_ = e.Prov.SetStateReason(name, workspace.StateUnhealthy, where+" failed; see the relay log")
 			if fresh, lerr := e.Prov.Load(name); lerr == nil && fresh != nil {
@@ -224,9 +230,10 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 // the workspace root — the validator rejects the obvious spellings, and this is
 // the enforcement that does not depend on having been validated.
 func (e *Engine) materialiseFile(f fleet.File, rec *workspace.Record, repoRoot string) (Step, error) {
-	dest := filepath.Join(rec.Path, f.To)
+	to := interpolate(f.To, rec.Vars)
+	dest := filepath.Join(rec.Path, to)
 	if !within(rec.Path, dest) {
-		return Step{}, fmt.Errorf("destination %q escapes the workspace root", f.To)
+		return Step{}, fmt.Errorf("destination %q escapes the workspace root", to)
 	}
 	src := f.From
 	if src == "" {
@@ -239,10 +246,20 @@ func (e *Engine) materialiseFile(f fleet.File, rec *workspace.Record, repoRoot s
 	if f.Template != "" {
 		action = "render"
 	}
+	// The plan names the source as well as the destination: a reviewer of the
+	// dry run must see what a spec reads, not only where it writes.
+	detail := f.From
+	if detail == "" {
+		detail = f.Template
+	}
+	detail += " -> " + to
 	// A dry run reports what it would do without reading the repo or writing the
 	// workspace: the plan is about the graph, not about the box's current files.
 	if e.DryRun {
-		return Step{Stage: "files", Action: action, Detail: f.To, Skipped: true, Reason: "dry run"}, nil
+		return Step{Stage: "files", Action: action, Detail: detail, Skipped: true, Reason: "dry run"}, nil
+	}
+	if err := allowedSource(e.FS, src, repoRoot); err != nil {
+		return Step{}, err
 	}
 	b, err := e.FS.ReadFile(src)
 	if err != nil {
@@ -251,10 +268,31 @@ func (e *Engine) materialiseFile(f fleet.File, rec *workspace.Record, repoRoot s
 	if f.Template != "" {
 		b = []byte(interpolate(string(b), rec.Vars))
 	}
-	if err := e.FS.WriteFileWithin(rec.Path, f.To, b, 0o600); err != nil {
+	if err := e.FS.WriteFileWithin(rec.Path, to, b, 0o600); err != nil {
 		return Step{}, err
 	}
-	return Step{Stage: "files", Action: action, Detail: f.To}, nil
+	return Step{Stage: "files", Action: action, Detail: detail}, nil
+}
+
+// allowedSource bounds what a committed spec may read into a workspace: files
+// inside the checkout, or files directly beside it (the `../.env.local`
+// convention for per-checkout secrets). Symlinks are resolved first, so a
+// committed link cannot point the copy at the operator's home directory, and
+// nothing nested under a sibling directory (another project's secrets) is
+// reachable.
+func allowedSource(fsys FileSystem, src, repoRoot string) error {
+	root, err := fsys.Resolve(repoRoot)
+	if err != nil {
+		return fmt.Errorf("resolving repository root: %w", err)
+	}
+	resolved, err := fsys.Resolve(src)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", src, err)
+	}
+	if within(root, resolved) || filepath.Dir(resolved) == filepath.Dir(root) {
+		return nil
+	}
+	return fmt.Errorf("source %q resolves to %s, outside the checkout and its parent directory", src, resolved)
 }
 
 // runCommand caches successful execution within the same workspace and expanded
@@ -269,9 +307,18 @@ func (e *Engine) runCommand(c fleet.Command, rec *workspace.Record, repoRoot str
 	}
 	hash := ""
 	if c.CacheKey != "" {
-		hash, _ = e.hashFile(filepath.Join(repoRoot, c.CacheKey))
+		// The key is read from the tree the command runs in; the main checkout
+		// only stands in when the worktree lacks the file.
+		var err error
+		if hash, err = e.hashFile(filepath.Join(rec.Path, c.CacheKey)); errors.Is(err, fs.ErrNotExist) {
+			hash, _ = e.hashFile(filepath.Join(repoRoot, c.CacheKey))
+		}
 		if hash != "" {
-			if hit, err := e.cacheHit(rec.Path, line, hash); err == nil && hit {
+			hit, err := e.cacheHit(rec.Path, line, hash)
+			if err != nil {
+				return step, err
+			}
+			if hit {
 				step.Skipped = true
 				step.Reason = "cache_key " + c.CacheKey + " unchanged in this workspace"
 				return step, nil
@@ -309,7 +356,10 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 	}
 	defer unlock()
 	up, err := e.serviceUp(scope)
-	if err == nil && up {
+	if err != nil {
+		return step, err // an unreadable cache must not start a service twice
+	}
+	if up {
 		// The cache remembers that we started it; it cannot know it is still
 		// alive. For a supervised service, check before believing the cache —
 		// otherwise a service that died stays "already running" forever and
@@ -326,10 +376,6 @@ func (e *Engine) startService(sv fleet.Service, rec *workspace.Record, repoRoot 
 			return step, nil
 		}
 		step.Reason = "restarting: supervised service was not answering"
-	}
-	if e.DryRun {
-		step.Skipped, step.Reason = true, "dry run"
-		return step, nil
 	}
 	if out, err := e.Exec.Run(rec.Path, envSlice(rec.Vars), line, 10*time.Minute); err != nil {
 		return step, fmt.Errorf("%s: %w: %s", sv.Name, err, strings.TrimSpace(string(out)))
@@ -365,6 +411,18 @@ func (e *Engine) probe(p fleet.Probe, rec *workspace.Record) (Step, bool) {
 	return step, true
 }
 
+// errClass names an error without reproducing a wrapped command's output.
+func errClass(err error) string {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.String()
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		return "timed out"
+	}
+	return "error (details in the command output returned to the caller)"
+}
+
 func within(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
@@ -388,20 +446,28 @@ type cacheSet struct {
 
 func (e *Engine) cachePath() string { return filepath.Join(e.Prov.Home, "materialise-cache.json") }
 
-func (e *Engine) loadCache() *cacheSet {
+func (e *Engine) loadCache() (*cacheSet, error) {
 	cs := &cacheSet{Commands: map[string]string{}, Services: map[string]bool{}}
 	b, err := os.ReadFile(e.cachePath())
-	if err != nil || len(b) == 0 {
-		return cs
+	if os.IsNotExist(err) {
+		return cs, nil
 	}
-	_ = json.Unmarshal(b, cs)
+	if err != nil {
+		return nil, err
+	}
+	// A cache that cannot be read is not an empty cache: treating it as one
+	// would start every once-per-repo service a second time. The engine only
+	// ever writes it whole (temp + rename), so a zero-byte file is damage too.
+	if err := json.Unmarshal(b, cs); err != nil {
+		return nil, fmt.Errorf("materialise cache %s is unreadable; inspect or delete it: %w", e.cachePath(), err)
+	}
 	if cs.Commands == nil {
 		cs.Commands = map[string]string{}
 	}
 	if cs.Services == nil {
 		cs.Services = map[string]bool{}
 	}
-	return cs
+	return cs, nil
 }
 
 func (e *Engine) saveCache(cs *cacheSet) error {
@@ -431,7 +497,11 @@ func (e *Engine) saveCache(cs *cacheSet) error {
 }
 
 func (e *Engine) cacheHit(repoRoot, run, hash string) (bool, error) {
-	return e.loadCache().Commands[repoRoot+"|"+run] == hash, nil
+	cs, err := e.loadCache()
+	if err != nil {
+		return false, err
+	}
+	return cs.Commands[repoRoot+"|"+run] == hash, nil
 }
 
 func (e *Engine) cachePut(repoRoot, run, hash string) error {
@@ -440,12 +510,21 @@ func (e *Engine) cachePut(repoRoot, run, hash string) error {
 		return err
 	}
 	defer unlock()
-	cs := e.loadCache()
+	cs, err := e.loadCache()
+	if err != nil {
+		return err
+	}
 	cs.Commands[repoRoot+"|"+run] = hash
 	return e.saveCache(cs)
 }
 
-func (e *Engine) serviceUp(scope string) (bool, error) { return e.loadCache().Services[scope], nil }
+func (e *Engine) serviceUp(scope string) (bool, error) {
+	cs, err := e.loadCache()
+	if err != nil {
+		return false, err
+	}
+	return cs.Services[scope], nil
+}
 
 func (e *Engine) serviceMark(scope string) error {
 	unlock, err := e.lockCacheScope("cache-write", 5*time.Second)
@@ -453,7 +532,10 @@ func (e *Engine) serviceMark(scope string) error {
 		return err
 	}
 	defer unlock()
-	cs := e.loadCache()
+	cs, err := e.loadCache()
+	if err != nil {
+		return err
+	}
 	cs.Services[scope] = true
 	return e.saveCache(cs)
 }

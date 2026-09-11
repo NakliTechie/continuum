@@ -191,8 +191,7 @@ func cmdToken(path string, args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		cfg.RegistrationToken = tok
-		if err := config.Save(path, cfg); err != nil {
+		if err := config.RotateToken(path, cfg, tok); err != nil {
 			fatal(err)
 		}
 		fmt.Println("Registration token rotated. Running relays revoke old connections before their next command or output. Processes keep running; clients must re-register. New token:")
@@ -215,6 +214,8 @@ Usage:
   menagerie-relay service uninstall remove the always-on service
   menagerie-relay service status    is the always-on service running?
   menagerie-relay init              write the config + token only (no serve)
+  menagerie-relay materialise       provision one workspace from a fleet spec
+                                    (--spec, --name, --repo, --home, --dry-run)
   menagerie-relay agents            list the agents detected on PATH (and the known
                                     ones that aren't installed)
   menagerie-relay token print       re-print (and copy) the registration token

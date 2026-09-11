@@ -3,6 +3,7 @@ package pty
 
 import (
 	"fmt"
+	"github.com/NakliTechie/continuum/internal/config"
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
@@ -19,11 +20,11 @@ import (
 
 // SessionsDir is ~/.menagerie/sessions, where raw PTY byte streams are captured.
 func SessionsDir() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".menagerie", "sessions"), nil
+	return filepath.Join(dir, "sessions"), nil
 }
 
 // Session is a running agent attached to a PTY.

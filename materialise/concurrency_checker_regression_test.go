@@ -116,7 +116,7 @@ func TestO4CheckerSeparateScopesOverlapAndPreserveCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cs := seed.loadCache()
+	cs := mustCache(t, seed)
 	if len(cs.Services) != 5 || !cs.Services["old-service"] || cs.Commands["/old|old-command"] != "old-hash" {
 		t.Fatalf("lost independent cache entries: %+v", cs)
 	}
@@ -181,7 +181,7 @@ func TestO4CheckerMixedCacheWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cs := e.loadCache()
+	cs := mustCache(t, e)
 	if len(cs.Commands) != 64 || len(cs.Services) != 64 {
 		t.Fatalf("cache lengths: commands=%d services=%d", len(cs.Commands), len(cs.Services))
 	}
@@ -221,7 +221,7 @@ func TestO4CheckerFailedServiceRetries(t *testing.T) {
 	if _, err := e.startService(sv, rec, "/repo"); err == nil || !strings.Contains(err.Error(), "injected failure: failed output") {
 		t.Fatalf("missing execution error: %v", err)
 	}
-	if e.loadCache().Services["/repo|db"] {
+	if mustCache(t, e).Services["/repo|db"] {
 		t.Fatal("failed start cached")
 	}
 	if s, err := e.startService(sv, rec, "/repo"); err != nil || s.Skipped {
@@ -251,7 +251,7 @@ func TestO4CheckerFailedCommandRetries(t *testing.T) {
 	if _, err := e.runCommand(c, rec, "/repo"); err == nil {
 		t.Fatal("failed command accepted")
 	}
-	if len(e.loadCache().Commands) != 0 {
+	if len(mustCache(t, e).Commands) != 0 {
 		t.Fatal("failed command cached")
 	}
 	if s, err := e.runCommand(c, rec, "/repo"); err != nil || s.Skipped {
@@ -330,7 +330,7 @@ func TestO4CheckerServiceMarkerLockTimeoutReported(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("effects=%d", calls.Load())
 	}
-	if e.loadCache().Services["/repo|db"] {
+	if mustCache(t, e).Services["/repo|db"] {
 		t.Fatal("marker recorded despite write lock timeout")
 	}
 }
@@ -353,10 +353,28 @@ func TestO4CheckerLockIOFailurePreventsExecution(t *testing.T) {
 func TestO4CheckerMarkerIOFailureReported(t *testing.T) {
 	home := t.TempDir()
 	var calls atomic.Int32
+	// An unreadable cache stops the run before any effect: a service must not
+	// start twice because its marker could not be read.
 	e := o4CheckerEngine(home, &calls)
 	if err := os.Mkdir(e.cachePath(), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := e.startService(fleet.Service{Name: "db", Run: "fake"}, o4CheckerRecord(home, "a"), "/repo"); err == nil {
+		t.Fatal("unreadable cache ignored")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("effects=%d before the cache was readable", calls.Load())
+	}
+	if err := os.Remove(e.cachePath()); err != nil {
+		t.Fatal(err)
+	}
+	// A marker that cannot be written after the effect is reported, not lost:
+	// the fake service obstructs the cache path while it "runs".
+	e = New(workspace.New(home))
+	e.Exec = o4CheckerExec(func(string, []string, string, time.Duration) ([]byte, error) {
+		calls.Add(1)
+		return nil, os.Mkdir(e.cachePath(), 0700)
+	})
 	if _, err := e.startService(fleet.Service{Name: "db", Run: "fake"}, o4CheckerRecord(home, "a"), "/repo"); err == nil || !strings.Contains(err.Error(), "inspect before retry") {
 		t.Fatalf("marker failure error=%v", err)
 	}
@@ -512,7 +530,7 @@ func TestO4CheckerCrossProcessAdmissionAndPreservation(t *testing.T) {
 			if nonskip != want {
 				t.Fatalf("non-skipped=%d want %d", nonskip, want)
 			}
-			cs := e.loadCache()
+			cs := mustCache(t, e)
 			if len(cs.Services) != want+1 || !cs.Services["old-svc"] || len(cs.Commands) != 49 || cs.Commands["/old|old"] != "seed" {
 				t.Fatalf("cache preservation: services=%d commands=%d old=%v", len(cs.Services), len(cs.Commands), cs)
 			}
@@ -631,4 +649,13 @@ func TestO4CheckerConcurrentRunSupervisedBinding(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("concurrent Engine.Run effects=%d, want 1 during delayed service binding", calls.Load())
 	}
+}
+
+func mustCache(t *testing.T, e *Engine) *cacheSet {
+	t.Helper()
+	cs, err := e.loadCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cs
 }

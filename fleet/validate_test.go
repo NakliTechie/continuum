@@ -31,6 +31,18 @@ var invalidWantPath = map[string]string{
 	"padded-unknown-probe.json":           "/workspace/materialise/health/0/probe",
 }
 
+// Rules the runtime enforces that the browser validator has not mirrored yet.
+// They live apart so mirror-check.mjs keeps comparing only shared rules; the
+// Menagerie client carries the follow-through to adopt them, after which the
+// fixtures move into invalid/.
+var pendingMirrorWantPath = map[string]string{
+	"missing-isolation.json":           "/workspace/isolation",
+	"health-negative-timeout.json":     "/workspace/materialise/health/0/timeout_s",
+	"budget-negative-usd.json":         "/budgets/per_agent_usd",
+	"branch-prefix-option-like.json":   "/workspace/branch_prefix",
+	"branch-prefix-interpolation.json": "/workspace/branch_prefix",
+}
+
 func read(t *testing.T, dir, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", dir, name))
@@ -78,6 +90,33 @@ func TestInvalidFixturesRejectedAtTheRightPath(t *testing.T) {
 			t.Fatalf("%s has no expected error path — add one rather than loosening the test", n)
 		}
 		_, issues := ValidateBytes(read(t, "invalid", n))
+		if len(issues) == 0 {
+			t.Errorf("%s: accepted, want rejection at %s", n, want)
+			continue
+		}
+		var found bool
+		for _, is := range issues {
+			if is.Path == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: no issue at %s; got %v", n, want, issues)
+		}
+	}
+}
+
+func TestPendingMirrorFixturesRejectedAtTheRightPath(t *testing.T) {
+	fs := names(t, "invalid-pending-mirror")
+	if len(fs) != 5 {
+		t.Fatalf("invalid fixtures = %d, want 5", len(fs))
+	}
+	for _, n := range fs {
+		want, ok := pendingMirrorWantPath[n]
+		if !ok {
+			t.Fatalf("%s has no expected error path — add one rather than loosening the test", n)
+		}
+		_, issues := ValidateBytes(read(t, "invalid-pending-mirror", n))
 		if len(issues) == 0 {
 			t.Errorf("%s: accepted, want rejection at %s", n, want)
 			continue

@@ -65,7 +65,7 @@ func (f *RecordingFS) ReadFile(p string) ([]byte, error) {
 	if b, ok := f.Writes[p]; ok {
 		return b, nil
 	}
-	return nil, fmt.Errorf("no such file (fake): %s", p)
+	return nil, fmt.Errorf("no such file (fake): %s: %w", p, fs.ErrNotExist)
 }
 
 func (f *RecordingFS) WriteFile(p string, b []byte, _ fs.FileMode) error {
@@ -91,6 +91,9 @@ type FailProber struct{}
 func (FailProber) HTTP(url string, _ time.Duration) error {
 	return fmt.Errorf("probe failed (fake): %s", url)
 }
+
+// Resolve follows no links: the fake has none, so a path is where it says.
+func (f *RecordingFS) Resolve(p string) (string, error) { return filepath.Clean(p), nil }
 
 func (f *RecordingFS) WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error {
 	return f.WriteFile(filepath.Join(root, relative), b, perm)

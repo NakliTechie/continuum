@@ -8,19 +8,31 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
-// DefaultPath is ~/.menagerie/relay.toml.
-func DefaultPath() (string, error) {
+// HomeDir is the legacy relay's state directory, ~/.menagerie: config,
+// captures, workspace records, service log. Every path under it derives from
+// here so a move touches one function.
+func HomeDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".menagerie", "relay.toml"), nil
+	return filepath.Join(home, ".menagerie"), nil
+}
+
+// DefaultPath is ~/.menagerie/relay.toml.
+func DefaultPath() (string, error) {
+	dir, err := HomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "relay.toml"), nil
 }
 
 // Agent is a configured agent the relay can spawn.
@@ -278,6 +290,85 @@ func Save(path string, c *Config) error {
 		return err
 	}
 	return os.Rename(f.Name(), path)
+}
+
+// RotateToken replaces only the registration_token line of the file at path,
+// keeping every other key, comment and line the operator put there; a file
+// without that line is re-encoded whole. The write is atomic like Save's.
+func RotateToken(path string, c *Config, token string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	quoted, err := tomlString(token)
+	if err != nil {
+		return err
+	}
+	// Only the top-level key, on one line, is rewritten in place: a
+	// registration_token inside some [table] is a different key, and a
+	// multi-line string cannot be swapped line by line. Anything else is
+	// re-encoded whole, which is what Save always did.
+	lines := strings.Split(string(raw), "\n")
+	found := false
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "[") {
+			break // the top-level section has ended
+		}
+		if !tokenLine.MatchString(l) {
+			continue
+		}
+		value := strings.TrimSpace(strings.SplitN(l, "=", 2)[1])
+		if strings.HasPrefix(value, `"""`) || strings.HasPrefix(value, "'''") {
+			break // multi-line value: fall back to a full rewrite
+		}
+		lines[i] = "registration_token = " + quoted
+		found = true
+		break
+	}
+	if !found {
+		c.RegistrationToken = token
+		return Save(path, c)
+	}
+	out := []byte(strings.Join(lines, "\n"))
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(out)
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// The line scan is textual; the parser is the judge. A rewrite that does
+	// not load back with the new token (a decoy line inside a multi-line
+	// string, say) is discarded for a full re-encode rather than announced.
+	if check, err := Load(f.Name()); err != nil || check.RegistrationToken != token {
+		c.RegistrationToken = token
+		return Save(path, c)
+	}
+	return os.Rename(f.Name(), path)
+}
+
+var tokenLine = regexp.MustCompile(`^[ \t]*registration_token[ \t]*=`)
+
+// tomlString renders a TOML basic string through the encoder so escaping
+// follows the same rules Save uses.
+func tomlString(v string) (string, error) {
+	var b strings.Builder
+	if err := toml.NewEncoder(&b).Encode(struct {
+		V string `toml:"v"`
+	}{v}); err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(b.String())
+	return strings.TrimSpace(strings.TrimPrefix(line, "v =")), nil
 }
 
 // Exists reports whether a config file is present at path.

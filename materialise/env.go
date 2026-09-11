@@ -20,15 +20,15 @@ import (
 	"time"
 )
 
-// FileSystem is the small surface the engine needs. It is an interface so the
-// dry run (C3) can hand it a fake that records writes instead of performing
-// them — and so the test suite can assert "no filesystem writes occurred".
+// FileSystem is the small surface the engine needs: read a source, write a
+// file that must stay inside a workspace root. It is an interface so the test
+// suite can substitute a recorder and assert "no filesystem writes occurred".
 type FileSystem interface {
 	ReadFile(path string) ([]byte, error)
-	WriteFile(path string, b []byte, perm fs.FileMode) error
 	WriteFileWithin(root, relative string, b []byte, perm fs.FileMode) error
-	MkdirAll(path string, perm fs.FileMode) error
-	Stat(path string) (fs.FileInfo, error)
+	// Resolve returns the path with every symlink followed, so a source policy
+	// judges where a file really is rather than where a link says it is.
+	Resolve(path string) (string, error)
 }
 
 // Executor runs one shell command line in a directory with an environment.
@@ -58,14 +58,7 @@ type Prober interface {
 type OSFileSystem struct{}
 
 func (OSFileSystem) ReadFile(p string) ([]byte, error) { return os.ReadFile(p) }
-func (OSFileSystem) WriteFile(p string, b []byte, perm fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, b, perm)
-}
-func (OSFileSystem) MkdirAll(p string, perm fs.FileMode) error { return os.MkdirAll(p, perm) }
-func (OSFileSystem) Stat(p string) (fs.FileInfo, error)        { return os.Stat(p) }
+func (OSFileSystem) Resolve(p string) (string, error)  { return filepath.EvalSymlinks(p) }
 
 // ShellExecutor runs command lines through `sh -c`, which is what a declared
 // `run` string means. A timeout of 0 means no timeout.
@@ -124,10 +117,31 @@ func (OSFileSystem) WriteFileWithin(root, relative string, b []byte, perm fs.Fil
 // references never reach here — the validator refuses them — so anything left
 // unresolved is a bug worth surfacing rather than silently blanking.
 func interpolate(s string, vars map[string]string) string {
-	for k, v := range vars {
-		s = strings.ReplaceAll(s, "${"+k+"}", v)
+	// One pass over the input, never over substituted text: a value that
+	// itself contains ${...} is data, and map order must not decide whether
+	// it expands.
+	var out strings.Builder
+	for {
+		start := strings.Index(s, "${")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(s[start:], "}")
+		if end < 0 {
+			break
+		}
+		name := s[start+2 : start+end]
+		v, ok := vars[name]
+		out.WriteString(s[:start])
+		if ok {
+			out.WriteString(v)
+		} else {
+			out.WriteString(s[start : start+end+1])
+		}
+		s = s[start+end+1:]
 	}
-	return s
+	out.WriteString(s)
+	return out.String()
 }
 
 // envSlice renders the variable set as KEY=VALUE. Declared variables only: the
