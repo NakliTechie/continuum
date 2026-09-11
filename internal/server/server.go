@@ -123,6 +123,11 @@ type Server struct {
 
 // New builds a Server for the given config.
 func New(cfg *config.Config) *Server {
+	if cfg.CaptureDir == nil && !cfg.FromFile() {
+		// Only a file-loaded legacy config may imply ~/.menagerie/sessions.
+		disabled := ""
+		cfg.CaptureDir = &disabled
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		ctx: ctx, cancel: cancel, conns: make(map[*conn]context.CancelFunc),

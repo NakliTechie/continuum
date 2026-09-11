@@ -26,7 +26,23 @@ import (
 var fakeAgentBin string
 
 func TestMain(m *testing.M) {
-	bin := filepath.Join(os.TempDir(), "menagerie-fakeagent")
+	// Every test's implicit home stays away from the installed Menagerie
+	// directory: a config without CaptureDir once defaulted to
+	// ~/.menagerie/sessions, and raw `go test` runs left thousands of
+	// fake-agent captures there.
+	home, err := os.MkdirTemp("", "continuum-test-home-")
+	if err != nil {
+		panic(err)
+	}
+	// Go's caches derive from HOME; pin the real ones so in-test builds stay warm.
+	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPATH"} {
+		if v, err := exec.Command("go", "env", key).Output(); err == nil {
+			os.Setenv(key, strings.TrimSpace(string(v)))
+		}
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("TMPDIR", home)
+	bin := filepath.Join(home, "menagerie-fakeagent")
 	cmd := exec.Command("go", "build", "-o", bin, "./testdata/fakeagent")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.Stderr.WriteString("build fakeagent: " + string(out))
@@ -34,7 +50,7 @@ func TestMain(m *testing.M) {
 	}
 	fakeAgentBin = bin
 	code := m.Run()
-	os.Remove(bin)
+	os.RemoveAll(home)
 	os.Exit(code)
 }
 

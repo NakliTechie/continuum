@@ -88,7 +88,10 @@ type Config struct {
 	// sourcePath is immutable after Load; only registration authority reloads.
 	sourcePath string
 
-	// CaptureDir is a programmatic override; nil retains legacy capture behavior.
+	// CaptureDir is a programmatic override. nil means: a file-loaded legacy
+	// config keeps Menagerie's home capture directory; a programmatic config
+	// captures nothing (server.New disables it), so tests and embedders never
+	// write into the installed relay's directory by omission.
 	CaptureDir        *string          `toml:"-"`
 	Name              string           `toml:"name"`
 	Listen            string           `toml:"listen"`
@@ -235,6 +238,10 @@ func Load(path string) (*Config, error) {
 // CurrentRegistrationToken reads current registration authority for a loaded
 // legacy config. Read/decode failures are errors, never a fallback to a revoked
 // startup token. Programmatic modern/test configs retain their explicit token.
+// FromFile reports whether Load produced this config. Programmatic configs
+// carry no source path and no implicit capture directory.
+func (c *Config) FromFile() bool { return c.sourcePath != "" }
+
 func (c *Config) CurrentRegistrationToken() (string, error) {
 	if c.sourcePath == "" {
 		return c.RegistrationToken, nil
