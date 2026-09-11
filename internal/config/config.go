@@ -267,14 +267,14 @@ func Save(path string, c *Config) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	defer f.Close()
-	if err := toml.NewEncoder(f).Encode(c); err != nil {
-		return err
+	err = toml.NewEncoder(f).Encode(c)
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
-	if err := f.Close(); err != nil {
+	if err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), path)

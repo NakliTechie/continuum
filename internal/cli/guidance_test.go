@@ -102,12 +102,21 @@ func TestAttachNarrowControlsAndTinyRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "essential cropped footer", func() bool { return strings.Contains(s.output.String(), "Ctrl-] detach • Observer • cropped") })
+	// A transient shrink below the minimum shows why nothing is drawn and keeps
+	// the session; growing back resumes frames, and Ctrl-] still detaches.
 	if err := creackpty.Setsize(s.master, &creackpty.Winsize{Cols: 20, Rows: 6}); err != nil {
 		t.Fatal(err)
 	}
-	s.finished(t, 2)
-	if !strings.Contains(s.diag.String(), "40 columns") {
-		t.Fatal(s.diag.String())
+	waitFor(t, "too-small notice", func() bool { return strings.Contains(s.output.String(), "Terminal too small") })
+	before := len(s.output.String())
+	if err := creackpty.Setsize(s.master, &creackpty.Winsize{Cols: 40, Rows: 10}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frames resume", func() bool { return strings.Contains(s.output.String()[before:], "ATTACH_READY") })
+	s.master.Write([]byte{0x1d})
+	s.finished(t, 0)
+	if strings.Contains(s.diag.String(), "40 columns") {
+		t.Fatalf("shrink ended the session: %s", s.diag.String())
 	}
 }
 func TestAttachHelpIsScoped(t *testing.T) {

@@ -41,10 +41,10 @@ First use (two terminals):
 
 Commands:
   serve                    run a foreground local daemon; Ctrl-C stops its work
-  status                   inspect up to 20 recorded blocks without taking control
-  open -- COMMAND ARGS     launch a PTY; arguments are preserved exactly
+  status                   inspect up to 20 recorded blocks; --cursor CURSOR pages, --block ID selects one
+  open -- COMMAND ARGS     launch a PTY; arguments are preserved exactly; --cwd DIR sets its directory
   attach --block ID        interactive screen-v1 terminal; Ctrl-] detaches
-  screen --block ID        inspect a current/final screen without taking control
+  screen --block ID        inspect a current/final screen without taking control; --json for frames
   events --block ID        replay bounded recorded events; --follow keeps watching
   acquire --block ID       acquire 60-second input control and save it privately
   takeover --block ID      explicitly fence an existing controller
@@ -54,6 +54,7 @@ Commands:
   resize --block ID --cols N --rows N
   stop --block ID          stop work using your saved lease
   version                  show build version
+  legacy SUBCOMMAND        Menagerie relay commands (serve, agents, token, service, materialise)
 
 Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
   --json (machine envelope), --request-id ID (reuse only for the same mutation).
@@ -61,7 +62,7 @@ Events: --after CURSOR, --follow, --text (printable text and colour only),
   --raw (byte-exact PTY replay including control sequences; trusted output only).
 Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
 Observation: --observer uses the read-only observer credential.
-Terminal: open --terminal screen-v1 -- COMMAND opts into server-owned screens.
+Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into server-owned screens.
 Attach: --observer is read-only; --takeover explicitly replaces a controller.
 Keyboard only; complex Unicode and advanced TUI compatibility are experimental.
 
@@ -91,25 +92,22 @@ func credential(dir, name string) (string, error) {
 	p := filepath.Join(dir, name)
 	b, err := privateRead(p)
 	if err == nil {
-		return strings.TrimSpace(string(b)), nil
+		v := strings.TrimSpace(string(b))
+		if v == "" {
+			return "", fmt.Errorf("%s is empty; delete it to generate a new credential", p)
+		}
+		return v, nil
 	}
 	if !os.IsNotExist(err) {
 		return "", err
 	}
+	// Written whole then renamed: an interrupted write never leaves an empty
+	// file that the next start would accept as a credential.
 	v := journal.ID() + journal.ID()
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
+	if err := atomicWrite(p, []byte(v+"\n")); err != nil {
 		return "", err
 	}
-	_, err = f.WriteString(v + "\n")
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return "", err
-	}
-	return v, closeErr
+	return v, nil
 }
 func atomicWrite(path string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".continuum-")
@@ -156,12 +154,13 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	observer := f.Bool("observer", false, "read-only credential")
 	request := f.String("request-id", "", "stable mutation ID")
 	cwd := f.String("cwd", "", "working directory")
-	cols := f.Int("cols", 80, "terminal columns")
-	rows := f.Int("rows", 24, "terminal rows")
+	cols := f.Int("cols", 0, "terminal columns (resize: required; open --terminal screen-v1: default 80)")
+	rows := f.Int("rows", 0, "terminal rows (resize: required; open --terminal screen-v1: default 24)")
 	listen := f.String("listen", "127.0.0.1:0", "loopback address")
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
 	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
+	f.Usage = func() {} // parse errors get one line below; -h prints the full help
 	if command == "attach" {
 		f.Usage = func() { fmt.Fprint(diag, attachHelp) }
 		for _, arg := range args[1:] {
@@ -176,10 +175,25 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprint(out, help)
 			return 0
 		}
+		fmt.Fprintf(diag, "usage: continuum %s [flags]; run continuum help for the flag list\n", command)
 		return 2
 	}
+	set := map[string]bool{}
+	f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
 	if !filepath.IsAbs(*state) {
 		fmt.Fprintln(diag, "--state must be an absolute directory")
+		return 2
+	}
+	if command != "serve" && (set["listen"] || set["origin"]) {
+		fmt.Fprintln(diag, "--listen and --origin are for serve")
+		return 2
+	}
+	if (set["cols"] || set["rows"]) && command != "resize" && command != "open" {
+		fmt.Fprintln(diag, "--cols and --rows are for resize and open --terminal screen-v1")
+		return 2
+	}
+	if command == "resize" && (*cols < 1 || *rows < 1) {
+		fmt.Fprintln(diag, "resize requires --cols N and --rows N")
 		return 2
 	}
 	if command == "serve" {
@@ -239,11 +253,16 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if mut && q.RequestID == "" {
 		q.RequestID = journal.ID()
 	}
+	if *block != "" && !validBlock(*block) {
+		return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full 16-character block ID from status or open", "status"), *machine, out, diag)
+	}
 	if command == "open" {
 		q.Args = f.Args()
 		q.Cwd = *cwd
 		if q.Cwd == "" {
 			q.Cwd, _ = os.Getwd()
+		} else if abs, err := filepath.Abs(q.Cwd); err == nil {
+			q.Cwd = abs // the daemon resolves nothing relative to this client
 		}
 		if len(q.Args) == 0 {
 			return render(api.Error(q.RequestID, "invalid_request", "command", "open requires -- COMMAND ARGS", "help"), *machine, out, diag)
@@ -261,13 +280,8 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	}
 	leasePath := ""
 	if command == "input" || command == "resize" || command == "stop" || command == "release" || command == "renew" || command == "acquire" || command == "takeover" {
-		if len(*block) != 16 {
+		if *block == "" {
 			return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full block ID from status or open", "status"), *machine, out, diag)
-		}
-		for _, r := range *block {
-			if !strings.ContainsRune("0123456789abcdef", r) {
-				return render(api.Error(q.RequestID, "invalid_request", "block_id", "invalid block ID", "status"), *machine, out, diag)
-			}
 		}
 		leasePath = filepath.Join(*state, "lease-"+*block)
 		if command != "acquire" && command != "takeover" {
@@ -281,6 +295,8 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var sanitizer textFilter // --text: one filter across every page, so split escapes stay caught
+	warned := false
+	degradedClass := "" // the first degraded envelope's class decides the exit code
 	for {
 		v := call(ctx, *state, *observer, q)
 		if v.Class == "ok" && (command == "acquire" || command == "takeover") {
@@ -310,14 +326,27 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			}
 			return 0
 		}
-		if command != "events" || v.Class != "ok" {
+		// Human output still gets the page under a degraded envelope; --json
+		// keeps the whole envelope so machine callers see the class themselves.
+		degraded := command == "events" && !*machine && (v.Class == "indeterminate" || v.Class == "history_gap") && len(v.Result) > 0
+		if command != "events" || (v.Class != "ok" && !degraded) {
 			return render(v, *machine, out, diag)
+		}
+		if degraded && !warned {
+			// The page is still delivered; the envelope's warning goes beside
+			// it, and the exit code carries the class once the run ends.
+			warned, degradedClass = true, v.Class
+			fmt.Fprintf(diag, "%s: %s\n", v.Code, v.Message)
 		}
 		var p journal.Page
 		if err := json.Unmarshal(v.Result, &p); err != nil {
 			return 8
 		}
+		exited := false
 		for _, e := range p.Events {
+			if e.Type == "exited" && q.Block != "" {
+				exited = true
+			}
 			if *plain || *rawOut {
 				if e.Type == "output" {
 					var data struct {
@@ -342,14 +371,26 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			}
 		}
 		q.After = p.Next
-		if p.Next < p.Last {
+		if v.Class == "history_gap" {
+			return api.Exit(degradedClass) // the first degraded class of this run
+		}
+		if p.Next < p.Last && !exited {
 			continue
 		}
-		if !*follow {
+		if !*follow || exited {
+			if exited && *follow && (*plain || *rawOut) {
+				fmt.Fprintf(diag, "Block %s exited.\n", q.Block)
+			}
+			if degradedClass != "" {
+				return api.Exit(degradedClass)
+			}
 			return 0
 		}
 		select {
 		case <-ctx.Done():
+			if degradedClass != "" {
+				return api.Exit(degradedClass)
+			}
 			return 0
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -401,9 +442,15 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
-	defer client.CloseIdleConnections()
-	resp, err := client.Do(req)
+	// Every request is safe to resend: reads by nature, mutations through the
+	// daemon's request-id ledger. Saying so lets net/http retry a POST whose
+	// reused connection turned out to be closed instead of failing it.
+	if q.RequestID != "" {
+		req.Header.Set("Idempotency-Key", q.RequestID)
+	} else {
+		req.Header.Set("Idempotency-Key", journal.ID())
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if !readOperation(q.Operation) {
 			return api.Error(q.RequestID, "indeterminate", "transport_lost", "request may have executed; retry with the same --request-id to reconcile", "status")
@@ -476,7 +523,7 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	h := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- h.Serve(ln) }()
-	fmt.Fprintf(diag, "Continuum %s ready at %s\nState: %s\nNext: continuum status --state %q\nCtrl-C stops this daemon and its processes.\n", Version, ln.Addr(), dir, dir)
+	fmt.Fprintf(diag, "Continuum %s ready at %s\nState: %s\nNext: %s\nCtrl-C stops this daemon and its processes.\n", Version, ln.Addr(), dir, clientCommand("status", dir, ""))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	select {
@@ -493,6 +540,15 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 		return err
 	}
 	return modern.CleanShutdown()
+}
+
+// httpClient is shared by every call in this process so a follow or attach
+// loop reuses one loopback connection instead of opening one per poll. No
+// proxy, no redirects: the endpoint is a loopback address this process read
+// from its own private state directory.
+var httpClient = &http.Client{
+	Transport:     &http.Transport{Proxy: nil, MaxIdleConns: 2, IdleConnTimeout: 30 * time.Second},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") },
 }
 
 func readOperation(op string) bool { return op == "status" || op == "events" || op == "screen" }

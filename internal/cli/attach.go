@@ -77,6 +77,14 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 	}
 	noColor := os.Getenv("NO_COLOR") != ""
 	inputFD, outputFD := input.Fd(), output.Fd()
+	// Raw I/O goes through a private description of the same terminal when one
+	// can be opened: the non-blocking flag lives on the open file description,
+	// and flipping it on the inherited stdin would reach the parent shell and
+	// every sibling job if this process died before restoring it.
+	if tty := privateTerminal(); tty != nil {
+		defer tty.Close()
+		inputFD, outputFD = tty.Fd(), tty.Fd()
+	}
 	cols, rows, err := term.GetSize(outputFD)
 	if err != nil {
 		fmt.Fprintln(diag, "cannot read terminal size:", err)
@@ -87,7 +95,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		fmt.Fprintln(diag, err)
 		return 2
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer cancel()
 	rpc := func(q api.Request) api.Response {
 		timeout := 3 * time.Second
@@ -251,9 +259,11 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 	defer ticks.Stop()
 	renew := time.NewTicker(20 * time.Second)
 	defer renew.Stop()
+	renewID, renewMisses := "", 0
 	lastRevision := uint64(0)
 	haveFrame := false
 	disconnected := false
+	tooSmall := false
 	paint := func(message string) error {
 		frame := view.Frame
 		if noColor {
@@ -312,8 +322,23 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 			if observer {
 				continue
 			}
-			r := rpc(api.Request{Operation: "renew", Block: block, Lease: lease, RequestID: journal.ID()})
-			if r.Class != "ok" {
+			// A renew that did not answer is retried with the same request ID
+			// on the next tick: the lease has 40 s of slack, and the ledger
+			// reconciles a duplicate. Only a definite refusal ends the session.
+			if renewID == "" {
+				renewID = journal.ID()
+			}
+			r := rpc(api.Request{Operation: "renew", Block: block, Lease: lease, RequestID: renewID})
+			switch {
+			case r.Class == "ok":
+				if renewMisses > 0 {
+					renew.Reset(20 * time.Second)
+				}
+				renewID, renewMisses = "", 0
+			case (r.Class == "unreachable" || r.Class == "indeterminate") && renewMisses < 2:
+				renewMisses++
+				renew.Reset(5 * time.Second)
+			default:
 				return fail(r)
 			}
 		case <-ticks.C:
@@ -325,9 +350,16 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 			}
 			next, err := attachViewport(physicalCols, physicalRows)
 			if err != nil {
-				cleanup()
-				fmt.Fprintln(diag, err)
-				return 2
+				// A window passing through a narrow state must not end the
+				// session; show why nothing is drawn and wait for it to grow.
+				if !tooSmall {
+					tooSmall = true
+					_, _ = io.WriteString(frameOut, "\x1b[2J\x1b[H\x1b[0mTerminal too small (need 40x3); enlarge it or press Ctrl-] to detach\r\n")
+				}
+				continue
+			}
+			if tooSmall {
+				tooSmall, haveFrame = false, false
 			}
 			if next != size {
 				size = next
@@ -491,4 +523,23 @@ func (w ttyWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+// privateTerminal opens the process's controlling terminal as a separate
+// description, so mode changes on the descriptor do not leak into the parent
+// shell. /dev/tty is a distinct device node that resolves to that terminal,
+// so it cannot be compared to stdin by identity; when a process has a
+// controlling terminal and a terminal on stdin, that is where the person is.
+// Returns nil when there is no controlling terminal (no TTY under a test
+// harness, for instance); the caller then uses the inherited descriptors.
+func privateTerminal() *os.File {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	if !term.IsTerminal(tty.Fd()) {
+		tty.Close()
+		return nil
+	}
+	return tty
 }
