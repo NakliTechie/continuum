@@ -32,7 +32,7 @@ The future runtime can be supplied through explicit executable paths; the docume
 
 ## Run
 
-On macOS or Linux with Go 1.26.2, Git, Python 3 and tar:
+On macOS or Linux with Go 1.26.8, Git, Python 3 and tar:
 
 ```sh
 python3 scripts/check_legacy.py --source ../menagerie

@@ -44,7 +44,7 @@ The automated gate covers the core with Go's race detector, a real CLI journey a
 
 ### Build and try
 
-Requires Go 1.26.2; verification also uses Python 3 and Git.
+Requires Go 1.26.8 (older 1.26 releases carry stdlib advisories reachable from this module); verification also uses Python 3, Git and, when installed, govulncheck.
 
 ```sh
 go build -o bin/continuum ./cmd/continuum

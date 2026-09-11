@@ -73,6 +73,11 @@ def main():
             pkgs = packages()
             run(['go', 'test', '-race', '-count=1', '-timeout=120s'] + pkgs, env=env)
             run(['go', 'vet'] + pkgs, env=env)
+            if shutil.which('govulncheck'):
+                run(['govulncheck'] + pkgs, env=env)
+            else:
+                print(json.dumps({'class': 'warning', 'check': 'govulncheck',
+                                  'message': 'govulncheck is not installed; known-vulnerability scan skipped'}))
         if 'cli' in features:
             binary = temp / 'continuum'
             run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
