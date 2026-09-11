@@ -8,7 +8,10 @@
 package tmux
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -53,16 +56,18 @@ func Create(name, cwd string, env, argv []string) error {
 	if cwd != "" {
 		args = append(args, "-c", cwd)
 	}
-	for _, e := range env {
-		// A relay running inside tmux would otherwise nest; drop those.
-		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
-			continue
-		}
-		args = append(args, "-e", e)
-	}
-	args = append(args, shellJoin(argv))
-	if err := exec.Command("tmux", args...).Run(); err != nil {
+	// The environment reaches the agent through a private file its shell
+	// sources and removes, never through tmux's -e flags: process arguments
+	// are readable by every user on the host, and the relay's environment
+	// (plus anything a client passed in spawn.env) is not.
+	envFile, err := writeEnvFile(env)
+	if err != nil {
 		return err
+	}
+	args = append(args, envWrapper(envFile, argv))
+	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+		_ = os.Remove(envFile)
+		return fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	// Best-effort tuning — failures here don't fail the spawn.
 	setOption(name, "status", "off")
@@ -72,29 +77,74 @@ func Create(name, cwd string, env, argv []string) error {
 	return nil
 }
 
+// envName matches the variable names a POSIX shell can assign; anything else
+// (tmux's -e accepted it, a sourced file cannot) is dropped.
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// writeEnvFile persists env as `export NAME='value'` lines in a 0600 file.
+func writeEnvFile(env []string) (string, error) {
+	f, err := os.CreateTemp("", "continuum-env-")
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, e := range env {
+		name, value, ok := strings.Cut(e, "=")
+		// A relay running inside tmux would otherwise nest; drop those.
+		if !ok || name == "TMUX" || name == "TMUX_PANE" || !envName.MatchString(name) {
+			continue
+		}
+		b.WriteString("export " + name + "=" + shellQuote(value) + "\n")
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// envWrapper renders the shell line tmux runs: source the private environment,
+// remove it, then replace the shell with the agent. rm is resolved here, on the
+// relay's PATH, because the sourced file may have replaced PATH with one that
+// cannot find it.
+func envWrapper(envFile string, argv []string) string {
+	rm, err := exec.LookPath("rm")
+	if err != nil {
+		rm = "/bin/rm"
+	}
+	q := shellQuote(envFile)
+	return ". " + q + "; " + shellQuote(rm) + " -f " + q + "; exec " + shellJoin(argv)
+}
+
+// target names a session exactly. Without the leading "=", tmux falls back to
+// prefix and fnmatch matching and "-t dev" can address "dev2".
+func target(name string) string { return "=" + name }
+
 // SetAgent tags a session with its Menagerie agent id.
 func SetAgent(name, agent string) { setOption(name, agentOption, agent) }
 
 // AttachCmd builds the `tmux attach` command the relay runs on a PTY. Killing
 // this process only detaches; the session (and agent) live on — use Kill to end it.
 func AttachCmd(name string) *exec.Cmd {
-	cmd := exec.Command("tmux", "attach-session", "-t", name)
+	cmd := exec.Command("tmux", "attach-session", "-t", target(name))
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	return cmd
 }
 
 // Kill ends the session and the agent inside it.
 func Kill(name string) error {
-	return exec.Command("tmux", "kill-session", "-t", name).Run()
+	return exec.Command("tmux", "kill-session", "-t", target(name)).Run()
 }
 
 // Exists reports whether the session is still alive.
 func Exists(name string) bool {
-	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
+	return exec.Command("tmux", "has-session", "-t", target(name)).Run() == nil
 }
-
-// IsMenagerie reports whether this is a session Menagerie itself created.
-func (s Session) IsMenagerie() bool { return strings.HasPrefix(s.Name, NamePrefix) }
 
 // List returns every tmux session currently alive (the caller decides which to
 // adopt). It lists names only (no delimiter to mangle), then queries each
@@ -122,11 +172,11 @@ func List() []Session {
 }
 
 func setOption(name, key, val string) {
-	_ = exec.Command("tmux", "set-option", "-t", name, key, val).Run()
+	_ = exec.Command("tmux", "set-option", "-t", target(name), key, val).Run()
 }
 
 func getOption(name, key string) string {
-	out, err := exec.Command("tmux", "show-options", "-t", name, "-qv", key).Output()
+	out, err := exec.Command("tmux", "show-options", "-t", target(name), "-qv", key).Output()
 	if err != nil {
 		return ""
 	}
@@ -134,7 +184,7 @@ func getOption(name, key string) string {
 }
 
 func display(name, format string) string {
-	out, err := exec.Command("tmux", "display-message", "-t", name, "-p", format).Output()
+	out, err := exec.Command("tmux", "display-message", "-t", target(name), "-p", format).Output()
 	if err != nil {
 		return ""
 	}
@@ -154,7 +204,7 @@ func shellQuote(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if !strings.ContainsAny(s, " \t\n\r'\"\\$`&|;<>()*?[]#~=!") {
+	if !strings.ContainsAny(s, " \t\n\r'\"\\$`&|;<>()*?[]{},^#~=!") {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

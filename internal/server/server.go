@@ -1250,7 +1250,7 @@ func stampReplaySeq(b []byte) []byte {
 		return b
 	}
 	m["seq"] = json.RawMessage("-1")
-	if nb, err := json.Marshal(m); err == nil {
+	if nb, err := jsonwire.Marshal(m); err == nil {
 		return nb
 	}
 	return b
@@ -1540,7 +1540,7 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 		if inTmux {
 			_ = sess.Write([]byte{0x03}) // ^C through the attach PTY — SIGINT to the client would only detach
 		} else {
-			sess.Interrupt()
+			sess.Interrupt() // protocol 1.x defines interrupt as SIGINT to the agent process
 		}
 	case protocol.SignalResize:
 		_ = sess.Resize(msg.Cols, msg.Rows)

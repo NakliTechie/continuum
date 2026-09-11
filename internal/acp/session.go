@@ -350,7 +350,7 @@ func (s *Session) dispatchFrame(env *Envelope, raw []byte) {
 		if ch != nil {
 			ch <- env
 		}
-	case env.hasID() && strings.HasPrefix(env.Method, "session/request_permission"):
+	case env.hasID() && env.Method == "session/request_permission":
 		s.handlePermissionRequest(env, raw)
 	case env.hasID():
 		// An agent->client request we do not implement (fs reads, terminal…).
@@ -425,9 +425,6 @@ func (s *Session) RespondPermission(requestID, outcome, explicitOptionID string)
 	rpcID := append(json.RawMessage(nil), p.rpcID...)
 	s.mu.Unlock()
 
-	if optionID == "" {
-		return fmt.Errorf("no option for outcome %q", outcome)
-	}
 	if err := s.write(Envelope{JSONRPC: "2.0", ID: rpcID, Result: permissionResult("selected", optionID)}); err != nil {
 		return err
 	}
@@ -523,11 +520,6 @@ func (s *Session) closeFiles() {
 		_ = s.cap.Close()
 	}
 	s.capMu.Unlock()
-}
-
-// request sends a request and waits for its response up to timeout.
-func (s *Session) request(method string, params any, timeout time.Duration) (*Envelope, error) {
-	return s.requestContext(context.Background(), method, params, timeout)
 }
 
 func (s *Session) requestContext(ctx context.Context, method string, params any, timeout time.Duration) (*Envelope, error) {
@@ -640,11 +632,23 @@ func (s *Session) logFrame(dir string, frame []byte) {
 	if s.cap == nil {
 		return
 	}
-	rec, _ := json.Marshal(struct {
-		At    string          `json:"at"`
-		Dir   string          `json:"dir"`
-		Frame json.RawMessage `json:"frame"`
-	}{time.Now().UTC().Format(time.RFC3339Nano), dir, json.RawMessage(frame)})
+	// A line that is not JSON (an agent's debug print, a banner) is captured
+	// as text: encoding/json refuses an invalid RawMessage and the frame would
+	// otherwise vanish from the replay artifact, contradicting capture-first.
+	var rec []byte
+	if json.Valid(frame) {
+		rec, _ = json.Marshal(struct {
+			At    string          `json:"at"`
+			Dir   string          `json:"dir"`
+			Frame json.RawMessage `json:"frame"`
+		}{time.Now().UTC().Format(time.RFC3339Nano), dir, json.RawMessage(frame)})
+	} else {
+		rec, _ = json.Marshal(struct {
+			At  string `json:"at"`
+			Dir string `json:"dir"`
+			Raw string `json:"raw"`
+		}{time.Now().UTC().Format(time.RFC3339Nano), dir, string(frame)})
+	}
 	// Reader goroutine (a>c) and writer path (c>a) both log — serialize so lines
 	// never interleave and corrupt the JSONL replay artifact.
 	s.capMu.Lock()
