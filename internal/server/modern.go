@@ -265,9 +265,18 @@ func (m *Modern) mutate(q api.Request) api.Response {
 	encoded, _ := json.Marshal(q)
 	hash := sha256.Sum256(encoded)
 	digest := hex.EncodeToString(hash[:])
-	old, err := m.Store.Begin(q.RequestID, digest)
+	old, err := m.Store.Lookup(q.RequestID)
 	if err != nil {
-		return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot commit operation intent", "status")
+		return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot read operation intent", "status")
+	}
+	if old == nil {
+		// A request that cannot have an effect never occupies the ledger.
+		if q.Operation != "open" && m.s.entry(q.Block) == nil {
+			return api.Error(q.RequestID, "conflict", "not_running", "block has no running process", "status")
+		}
+		if old, err = m.Store.Begin(q.RequestID, digest); err != nil {
+			return api.Error(q.RequestID, "resource_exhausted", "intent_store", "cannot commit operation intent", "status")
+		}
 	}
 	if old != nil {
 		if old.Digest != digest {

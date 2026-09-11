@@ -22,7 +22,7 @@ Options: current takeover-only attachment; observers plus leased control; simult
 
 ## Question 4 — How much history is retained?
 
-> **Status:** SELECTED FOR ALPHA — default content recording, bbolt/fsync, 4096 events/8 MiB logical retention, explicit gaps and incomplete-history signals. Physical database size may exceed retained payloads. Per-session exclusion, purge and compaction remain later work.
+> **Status:** SELECTED FOR ALPHA — default content recording, bbolt/fsync, 4096 events/16 MiB logical retention, explicit gaps and incomplete-history signals. Physical database size may exceed retained payloads. Per-session exclusion, purge and compaction remain later work.
 
 Options: unlimited automatic capture; opt-in content capture; bounded default capture with per-session exclusion. Select the default and exact disk/time limits before the first persistent runtime release. Preserve metadata without assuming content capture. Terminal output can contain credentials; do not describe redaction as complete protection. Choose storage driver and fsync/ack contract with crash tests.
 

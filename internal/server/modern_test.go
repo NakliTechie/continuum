@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -130,5 +131,33 @@ func TestUnresolvedIntentAndCaptureFailure(t *testing.T) {
 	}
 	if r := call("viewer", api.Request{Operation: "events"}); r.Code != "capture_degraded" {
 		t.Fatal(r)
+	}
+}
+
+// The duplicate-request window must never leave a daemon unable to stop its
+// own processes: after more mutations than the ledger retains, stop still
+// lands, and a mutation that can have no effect never occupies the ledger.
+func TestLedgerWindowNeverBlocksStop(t *testing.T) {
+	m, call := modernTest(t)
+	m.Store.MaxOperations = 8
+	id := value(t, call("operator", api.Request{Operation: "open", RequestID: "open", Cwd: t.TempDir(), Args: []string{"/bin/cat"}}), "block_id")
+	lease := value(t, call("operator", api.Request{Operation: "acquire", Block: id, RequestID: "control"}), "lease")
+	for i := 0; i < 40; i++ {
+		r := call("operator", api.Request{Operation: "renew", Block: id, Lease: lease, RequestID: fmt.Sprintf("renew-%d", i)})
+		if r.Class != "ok" {
+			t.Fatalf("renew %d: %+v", i, r)
+		}
+	}
+	if r := call("operator", api.Request{Operation: "stop", Block: id, Lease: lease, RequestID: "stop"}); r.Class != "ok" {
+		t.Fatalf("stop after the window filled: %+v", r)
+	}
+	if old, err := m.Store.Lookup("renew-0"); err != nil || old != nil {
+		t.Fatalf("oldest renew must have left the window: %v %v", old, err)
+	}
+	if r := call("operator", api.Request{Operation: "stop", Block: "0123456789abcdef", Lease: "x", RequestID: "ghost"}); r.Code != "not_running" {
+		t.Fatalf("stop on an unknown block: %+v", r)
+	}
+	if old, err := m.Store.Lookup("ghost"); err != nil || old != nil {
+		t.Fatalf("a no-effect request must not occupy the ledger: %v %v", old, err)
 	}
 }

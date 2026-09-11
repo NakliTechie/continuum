@@ -23,6 +23,9 @@ type Store struct {
 	db                  *bolt.DB
 	Host                string
 	MaxEvents, MaxBytes int
+	// MaxOperations bounds the duplicate-request window: the most recent
+	// resolved intents are retained; older identities are forgotten.
+	MaxOperations int
 }
 type Block struct {
 	HistoryIncomplete bool   `json:"history_incomplete"`
@@ -91,7 +94,7 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open state (another daemon may own it): %w", err)
 	}
-	s := &Store{db: db, MaxEvents: 4096, MaxBytes: 16 << 20}
+	s := &Store{db: db, MaxEvents: 4096, MaxBytes: 16 << 20, MaxOperations: 4096}
 	err = db.Update(func(tx *bolt.Tx) error {
 		meta, err := tx.CreateBucketIfNotExists([]byte("meta"))
 		if err != nil {
@@ -103,8 +106,21 @@ func Open(dir string) (*Store, error) {
 		if err := meta.Put([]byte("schema"), []byte("1")); err != nil {
 			return err
 		}
-		for _, name := range []string{"blocks", "events", "operations"} {
+		for _, name := range []string{"blocks", "events", "operations", "operation_order"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
+				return err
+			}
+		}
+		// Intents recorded before the order index existed get one entry each,
+		// so the retention window can retire them too.
+		if order := tx.Bucket([]byte("operation_order")); order.Stats().KeyN == 0 {
+			if err := tx.Bucket([]byte("operations")).ForEach(func(k, _ []byte) error {
+				seq, err := order.NextSequence()
+				if err != nil {
+					return err
+				}
+				return order.Put(key(seq), append([]byte(nil), k...))
+			}); err != nil {
 				return err
 			}
 		}
@@ -306,8 +322,25 @@ func (s *Store) Read(after uint64, block string) (Page, error) {
 	return p, err
 }
 
+// Lookup returns a recorded intent for id, or nil when the identity is unknown
+// or has left the retention window.
+func (s *Store) Lookup(id string) (*Intent, error) {
+	var old *Intent
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if v := tx.Bucket([]byte("operations")).Get([]byte(id)); v != nil {
+			old = &Intent{}
+			return json.Unmarshal(v, old)
+		}
+		return nil
+	})
+	return old, err
+}
+
 // Begin atomically records an intent before a host effect. Existing unresolved
 // intents are returned to the caller for reconciliation, never re-executed.
+// The ledger keeps at most MaxOperations identities: the oldest resolved ones
+// are retired to make room, so a long-lived daemon never refuses mutations;
+// unresolved intents are never retired, and only they can exhaust the ledger.
 func (s *Store) Begin(id, digest string) (*Intent, error) {
 	var old *Intent
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -316,8 +349,46 @@ func (s *Store) Begin(id, digest string) (*Intent, error) {
 			old = &Intent{}
 			return json.Unmarshal(v, old)
 		}
-		if b.Stats().KeyN >= 4096 {
+		order := tx.Bucket([]byte("operation_order"))
+		// Select retirements with a read-only walk, then delete: a bbolt cursor
+		// must not be advanced across its own deletions.
+		// Stats() reads committed pages, so the live count is tracked by hand
+		// across this transaction's own deletions.
+		live := b.Stats().KeyN
+		var retire [][2][]byte
+		if live >= s.MaxOperations {
+			c := order.Cursor()
+			for k, v := c.First(); k != nil && live >= s.MaxOperations; k, v = c.Next() {
+				if raw := b.Get(v); raw != nil {
+					var it Intent
+					if err := json.Unmarshal(raw, &it); err != nil {
+						return err
+					}
+					if len(it.Result) == 0 {
+						continue // unresolved: keep for reconciliation
+					}
+					live--
+				}
+				retire = append(retire, [2][]byte{append([]byte(nil), k...), append([]byte(nil), v...)})
+			}
+		}
+		for _, r := range retire {
+			if err := order.Delete(r[0]); err != nil {
+				return err
+			}
+			if err := b.Delete(r[1]); err != nil {
+				return err
+			}
+		}
+		if live >= s.MaxOperations {
 			return ErrLimit
+		}
+		seq, err := order.NextSequence()
+		if err != nil {
+			return err
+		}
+		if err := order.Put(key(seq), []byte(id)); err != nil {
+			return err
 		}
 		raw, _ := json.Marshal(Intent{Digest: digest})
 		return b.Put([]byte(id), raw)
