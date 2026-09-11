@@ -1458,6 +1458,10 @@ func (cn *conn) handleInput(raw json.RawMessage) {
 		cn.sendError("", "bad_message", "malformed input")
 		return
 	}
+	if m := cn.srv.modern; m != nil && m.leaseExpired(msg.SessionID, msg.SessionToken) {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "control lease expired; acquire current control")
+		return
+	}
 	sess, ok := cn.srv.getSession(msg.SessionID, msg.SessionToken)
 	if !ok {
 		if e := cn.srv.authSession(msg.SessionID, msg.SessionToken); e != nil && e.acp != nil {
@@ -1483,6 +1487,10 @@ func (cn *conn) handleSignal(raw json.RawMessage) {
 	var msg protocol.Signal
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		cn.sendError("", "bad_message", "malformed signal")
+		return
+	}
+	if m := cn.srv.modern; m != nil && m.leaseExpired(msg.SessionID, msg.SessionToken) {
+		cn.sendError(msg.SessionID, protocol.ErrInvalidToken, "control lease expired; acquire current control")
 		return
 	}
 	e := cn.srv.authSession(msg.SessionID, msg.SessionToken)

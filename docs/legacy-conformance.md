@@ -6,7 +6,7 @@
 
 A black-box Go integration suite launches the pinned Menagerie relay in a disposable environment, drives its public WebSocket protocol, and asserts behaviors that a future shared runtime must preserve. No imports from Menagerie's internal packages and no persistent copy/fork of its runtime source.
 
-The baseline runner uses the existing local Menagerie Git object database, extracts the exact pinned revision into a temporary directory, verifies the 42 inventory hashes, and builds the relay plus its fake ACP test agent. Test children receive an isolated home, minimal environment, loopback-only listener, tmux disabled, and no real provider agents. It does not read the installed relay config or contact the installed service. Cleanup terminates the disposable process group and removes temporary files.
+The baseline runner uses the existing local Menagerie Git object database, extracts the exact pinned revision into a temporary directory, verifies the 42 inventory hashes, and builds the relay plus its fake ACP test agent. The inventory covers the runtime sources and fixtures; the fake agent and the relay's `main` are pinned by the extracted commit hash rather than by inventory entries. Test children receive an isolated home, minimal environment, loopback-only listener, tmux disabled, and no real provider agents. It does not read the installed relay config or contact the installed service. Cleanup terminates the disposable process group and removes temporary files.
 
 ## Cases in this slice
 

@@ -49,6 +49,30 @@ func TestAttachDumbRefusesBeforeControl(t *testing.T) {
 		t.Fatal(s.diag.String())
 	}
 }
+
+// --takeover sends the explicit takeover operation, never acquire, so an
+// occupied block is replaced rather than refused; the session then runs as a
+// controller and releases on detach.
+func TestAttachTakeoverReplacesAnOccupiedController(t *testing.T) {
+	dir, f := newAttachFixture(t)
+	f.mu.Lock()
+	f.controlled = true // acquire would be refused; takeover must not be
+	f.mu.Unlock()
+	s := startTakeover(t, dir)
+	waitFor(t, "controller frame", func() bool { return strings.Contains(s.output.String(), "Ctrl-] detach • Control") })
+	s.master.Write([]byte{0x1d})
+	s.finished(t, 0)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ops := map[string]int{}
+	for _, q := range f.requests {
+		ops[q.Operation]++
+	}
+	if ops["takeover"] != 1 || ops["acquire"] != 0 || ops["release"] != 1 {
+		t.Fatalf("takeover journey issued %v", ops)
+	}
+}
+
 func TestAttachOccupiedControlHintsUseAttach(t *testing.T) {
 	dir, f := newAttachFixture(t)
 	f.mu.Lock()

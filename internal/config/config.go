@@ -4,6 +4,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 )
@@ -99,6 +102,12 @@ func (a Agent) ACPArgsOrDefault() []string {
 type Config struct {
 	// sourcePath is immutable after Load; only registration authority reloads.
 	sourcePath string
+	// The last decoded registration token and the file identity it came
+	// from; guarded by tokenMu. See CurrentRegistrationToken.
+	tokenMu     sync.Mutex
+	tokenCached bool
+	tokenFile   fileID
+	tokenValue  string
 
 	// CaptureDir is a programmatic override. nil means: a file-loaded legacy
 	// config keeps Menagerie's home capture directory; a programmatic config
@@ -233,10 +242,14 @@ func isLoopbackOrigin(origin string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// Load reads a config from path.
+// Load reads a config from path. The file holds the registration secret, so
+// a mode that lets other users read it is refused rather than served.
 func Load(path string) (*Config, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := requirePrivate(abs); err != nil {
 		return nil, err
 	}
 	var c Config
@@ -245,6 +258,23 @@ func Load(path string) (*Config, error) {
 	}
 	c.sourcePath = abs
 	return &c, nil
+}
+
+// requirePrivate refuses a config file readable by group or others. Save
+// writes 0600; a hand-made 0644 file would otherwise expose the token with
+// no warning, unlike the modern private-state credentials.
+func requirePrivate(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is readable by other users (mode %04o); it holds the registration token, run: chmod 600 %s", path, info.Mode().Perm(), path)
+	}
+	return nil
 }
 
 // CurrentRegistrationToken reads current registration authority for a loaded
@@ -258,13 +288,49 @@ func (c *Config) CurrentRegistrationToken() (string, error) {
 	if c.sourcePath == "" {
 		return c.RegistrationToken, nil
 	}
+	// Called before every frame a legacy connection writes. Decoding the
+	// file each time cost a read plus a TOML parse per output chunk per
+	// viewer; the file is only ever replaced whole (rename), so its identity
+	// (inode, size, mtime) tells whether the last decode is still current.
+	info, err := os.Stat(c.sourcePath)
+	if err != nil {
+		return "", err
+	}
+	if err := requirePrivate(c.sourcePath); err != nil {
+		return "", err
+	}
+	id := fileIdentity(info)
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.tokenCached && c.tokenFile == id {
+		return c.tokenValue, nil
+	}
 	var current struct {
 		RegistrationToken string `toml:"registration_token"`
 	}
 	if _, err := toml.DecodeFile(c.sourcePath, &current); err != nil {
 		return "", err
 	}
+	c.tokenCached, c.tokenFile, c.tokenValue = true, id, current.RegistrationToken
 	return current.RegistrationToken, nil
+}
+
+type fileID struct {
+	size  int64
+	mtime int64
+	ctime int64
+	inode uint64
+}
+
+// fileIdentity folds in the inode change time as well: an in-place edit that
+// restores the mtime still moves ctime, which no unprivileged process can set.
+func fileIdentity(info os.FileInfo) fileID {
+	id := fileID{size: info.Size(), mtime: info.ModTime().UnixNano()}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		id.inode = st.Ino
+		id.ctime = statCtime(st)
+	}
+	return id
 }
 
 // Save writes a config to path, creating the parent dir with 0700 and the file

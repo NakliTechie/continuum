@@ -70,9 +70,14 @@ type Snapshot struct {
 }
 
 type emulator struct {
-	mu            sync.Mutex
-	vt            *vt.Emulator
-	revision      uint64
+	mu       sync.Mutex
+	vt       *vt.Emulator
+	revision uint64
+	// cached is the last frame built, reused while the revision holds: a
+	// viewer polling an idle screen must not rebuild 19,200 cells under the
+	// same lock the output pump needs.
+	cached        *Snapshot
+	cachedRev     uint64
 	cursor        Cursor
 	modes         Modes
 	modeSet       map[ansi.Mode]bool
@@ -222,6 +227,17 @@ func (e *emulator) Resize(cols, rows int) ([]byte, error) {
 func (e *emulator) Snapshot() Snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.cached != nil && e.cachedRev == e.revision {
+		// Callers own their frame: the row slices are copied (string headers
+		// only), the cells are not rebuilt.
+		s := *e.cached
+		s.Lines = append([]string(nil), e.cached.Lines...)
+		s.ANSI = append([]string(nil), e.cached.ANSI...)
+		if e.fault != nil {
+			s.Fault = e.fault.Error()
+		}
+		return s
+	}
 	s := Snapshot{Engine: Name, Revision: e.revision, Cols: e.vt.Width(), Rows: e.vt.Height(), Alternate: e.vt.IsAltScreen(), Cursor: e.cursor, Modes: e.modes, Scrollback: e.vt.ScrollbackLen()}
 	pos := e.vt.CursorPosition()
 	s.Cursor.X = pos.X
@@ -258,6 +274,10 @@ func (e *emulator) Snapshot() Snapshot {
 		s.Lines[y] = plain.String()
 		s.ANSI[y] = styled.String()
 	}
+	frame := s
+	frame.Lines = append([]string(nil), s.Lines...)
+	frame.ANSI = append([]string(nil), s.ANSI...)
+	e.cached, e.cachedRev = &frame, e.revision
 	return s
 }
 func (e *emulator) Close() error {

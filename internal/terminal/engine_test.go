@@ -143,3 +143,27 @@ func TestConcurrentSnapshotsResizeAndClose(t *testing.T) {
 		t.Fatal("write after close")
 	}
 }
+
+// A frame is rebuilt only when the revision moves: repeated snapshots of an
+// idle screen return the same content, and any write invalidates it.
+func TestSnapshotIsCachedPerRevision(t *testing.T) {
+	e, err := New(20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if _, err := e.Feed([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	a, b := e.Snapshot(), e.Snapshot()
+	if a.Revision != b.Revision || a.Lines[0] != b.Lines[0] || !strings.HasPrefix(a.Lines[0], "hello") {
+		t.Fatalf("idle snapshots differ: %+v %+v", a.Lines, b.Lines)
+	}
+	if _, err := e.Feed([]byte(" world")); err != nil {
+		t.Fatal(err)
+	}
+	c := e.Snapshot()
+	if c.Revision == b.Revision || !strings.HasPrefix(c.Lines[0], "hello world") {
+		t.Fatalf("write did not invalidate the cached frame: rev %d vs %d %q", c.Revision, b.Revision, c.Lines[0])
+	}
+}

@@ -161,3 +161,50 @@ func TestLedgerWindowNeverBlocksStop(t *testing.T) {
 		t.Fatalf("a no-effect request must not occupy the ledger: %v %v", old, err)
 	}
 }
+
+// A modern lease that lapsed is fenced on the legacy door too: the same secret
+// is the legacy session token, and /v1 refusing it while the WebSocket still
+// honoured it left one adapter with a fence the other lacked.
+func TestLegacyAdapterRefusesAnExpiredModernLease(t *testing.T) {
+	m, call := modernTest(t)
+	id := value(t, call("operator", api.Request{Operation: "open", RequestID: "open", Cwd: t.TempDir(), Args: []string{"/bin/cat"}}), "block_id")
+	lease := value(t, call("operator", api.Request{Operation: "acquire", Block: id, RequestID: "control"}), "lease")
+	frames := make(chan map[string]any, 16)
+	cn := &conn{srv: m.s, ctx: context.Background(), registered: true, sink: func(b []byte) error {
+		var f map[string]any
+		_ = json.Unmarshal(b, &f)
+		select {
+		case frames <- f:
+		default:
+		}
+		return nil
+	}}
+	m.s.controlMu.Lock()
+	raw, _ := json.Marshal(protocol.Input{Type: protocol.TypeInput, SessionID: id, SessionToken: lease, Data: "live\n"})
+	cn.handleInput(raw)
+	m.s.controlMu.Unlock()
+	select {
+	case f := <-frames:
+		t.Fatalf("a live lease was refused on the legacy door: %v", f)
+	default:
+	}
+	m.leases[id] = structLeaseExpired(lease)
+	m.s.controlMu.Lock()
+	cn.handleInput(raw)
+	sig, _ := json.Marshal(protocol.Signal{Type: protocol.TypeSignal, SessionID: id, SessionToken: lease, Signal: protocol.SignalKill})
+	cn.handleSignal(sig)
+	m.s.controlMu.Unlock()
+	for i := 0; i < 2; i++ {
+		select {
+		case f := <-frames:
+			if f["type"] != "error" || f["code"] != protocol.ErrInvalidToken {
+				t.Fatalf("expired lease must be refused as %s: %v", protocol.ErrInvalidToken, f)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no refusal frame")
+		}
+	}
+	if m.s.entry(id) == nil {
+		t.Fatal("expired lease killed the block through the legacy door")
+	}
+}

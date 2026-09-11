@@ -412,6 +412,17 @@ func (m *Modern) effect(q api.Request) api.Response {
 	return api.Result(q.RequestID, map[string]any{"accepted": true})
 }
 
+// leaseExpired reports whether token is a modern control lease for block that
+// has lapsed. The legacy adapter checks it so an expired lease is fenced on
+// both doors, not only on /v1. Callers hold controlMu.
+func (m *Modern) leaseExpired(block, token string) bool {
+	current, ok := m.leases[block]
+	if !ok || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(current.Token), []byte(token)) == 1 && !current.Expires.After(time.Now())
+}
+
 // BeginShutdown cancels pending handshakes and closes hijacked WebSockets,
 // which net/http.Shutdown does not own. Established processes stop in StopAll.
 func (s *Server) BeginShutdown() {
