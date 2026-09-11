@@ -56,12 +56,20 @@ func (cn *conn) handlePrompt(raw json.RawMessage) {
 	turn := e.turn
 	e.status = protocol.StatusRunning
 	e.statusN++
+	tooMany := false
 	if w != nil {
-		w.turn = turn
-		w.timer = time.AfterFunc(waitTimeout(msg.Wait.TimeoutMS), func() { e.expireWait(w) })
-		e.waiters = append(e.waiters, w)
+		if len(e.waiters) >= maxWaiters {
+			tooMany, w = true, nil // the prompt proceeds; only its attached wait is refused
+		} else {
+			w.turn = turn
+			w.timer = time.AfterFunc(waitTimeout(msg.Wait.TimeoutMS), func() { e.expireWait(w) })
+			e.waiters = append(e.waiters, w)
+		}
 	}
 	e.statusMu.Unlock()
+	if tooMany {
+		cn.sendError(msg.SessionID, protocol.ErrBadWait, errTooManyWaiters.Error())
+	}
 	e.promptActive = true
 	e.resolveWaiters(protocol.StatusRunning)
 	cn.srv.queueStructuredEvent(e, msg.SessionID, protocol.EventRunning, nil)

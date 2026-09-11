@@ -362,6 +362,7 @@ func (s *Server) detach(cn *conn) {
 			e.sub = nil
 		}
 		e.subMu.Unlock()
+		e.dropWaiters(cn)
 	}
 }
 
@@ -846,6 +847,13 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
 		return
 	}
+	// Every secret exists before the process does, so no failure after spawn
+	// leaves a child nobody waits for.
+	token, err := config.GenerateToken()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
+		return
+	}
 	s := cn.srv
 
 	// When tmux is in play the agent runs inside a detached tmux session (so it
@@ -875,15 +883,6 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 			_ = tmux.Kill(tmuxName)
 		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
-		return
-	}
-	token, err := config.GenerateToken()
-	if err != nil {
-		sess.Kill()
-		if tmuxName != "" {
-			_ = tmux.Kill(tmuxName)
-		}
-		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)
@@ -927,6 +926,11 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		cn.sendError("", protocol.ErrSpawnFailed, "id generation failed")
 		return
 	}
+	token, err := config.GenerateToken()
+	if err != nil {
+		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
+		return
+	}
 	// A structured session reopens through ACP's own session/load — never by
 	// argv, and never by silently starting an empty conversation instead.
 	var sess *acp.Session
@@ -941,12 +945,6 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 			return
 		}
 		cn.sendError("", protocol.ErrSpawnFailed, err.Error())
-		return
-	}
-	token, err := config.GenerateToken()
-	if err != nil {
-		sess.Kill()
-		cn.sendError("", protocol.ErrSpawnFailed, "session token generation failed")
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)

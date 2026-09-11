@@ -83,3 +83,22 @@ func TestAuditKillDescendants(t *testing.T) {
 		t.Errorf("descendant %d remains alive after Kill", pid)
 	}
 }
+
+// The kernel takes a uint16 winsize; unbounded values wrap (65536 becomes a
+// zero-column terminal) and non-positive ones were silently ignored.
+func TestResizeRejectsOutOfRangeDimensions(t *testing.T) {
+	disabled := ""
+	s, err := Start("resize-bounds", "custom", exec.Command("/bin/cat"), &disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Kill(); s.Run(func(int, []byte) {}, func(int) {}) })
+	for _, size := range [][2]int{{0, 24}, {80, 0}, {65536, 24}, {80, 65616}, {-1, 24}, {MaxDimension + 1, 1}} {
+		if err := s.Resize(size[0], size[1]); err == nil {
+			t.Fatalf("resize %v accepted", size)
+		}
+	}
+	if err := s.Resize(120, 40); err != nil {
+		t.Fatalf("valid resize refused: %v", err)
+	}
+}

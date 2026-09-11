@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -30,6 +31,10 @@ const defaultWaitTimeout = 30 * time.Minute
 
 // maxWaitTimeout caps what a caller may ask for, same reasoning.
 const maxWaitTimeout = 24 * time.Hour
+
+// maxWaiters bounds pending waits per session; beyond it a client is looping,
+// not coordinating.
+const maxWaiters = 64
 
 type waiter struct {
 	id     string
@@ -76,10 +81,14 @@ var validWaitStates = map[string]bool{
 	protocol.StatusUnknown:     true,
 }
 
+// errTooManyWaiters is returned by armWait when the per-session bound is hit.
+var errTooManyWaiters = errors.New("too many pending waits on this session")
+
 // armWait registers a waiter, or reports the state that already satisfies it.
 // The check and the registration happen under one lock (E1): doing them apart
-// drops a transition that lands in between.
-func (e *sessionEntry) armWait(w *waiter) (state string, satisfied bool) {
+// drops a transition that lands in between. The per-session bound is enforced
+// under the same lock so two connections cannot both slip past it.
+func (e *sessionEntry) armWait(w *waiter) (state string, satisfied bool, err error) {
 	e.statusMu.Lock()
 	defer e.statusMu.Unlock()
 	current := e.status
@@ -87,13 +96,27 @@ func (e *sessionEntry) armWait(w *waiter) (state string, satisfied bool) {
 		current = protocol.StatusRunning
 	}
 	if w.closed { // its timer beat registration; already resolved
-		return "", false
+		return "", false, nil
 	}
 	if w.until[current] {
-		return current, true
+		return current, true, nil
+	}
+	if len(e.waiters) >= maxWaiters {
+		w.closed = true
+		if w.timer != nil {
+			w.timer.Stop()
+		}
+		return "", false, errTooManyWaiters
 	}
 	e.waiters = append(e.waiters, w)
-	return "", false
+	return "", false, nil
+}
+
+// pendingWaiters reports how many waits are registered on the entry.
+func (e *sessionEntry) pendingWaiters() int {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	return len(e.waiters)
 }
 
 // resolveWaiters is called on every status transition. On exit it drains every
@@ -117,6 +140,29 @@ func (e *sessionEntry) resolveWaiters(status string) {
 	for _, w := range fire {
 		w.resolve(status, false)
 	}
+}
+
+// dropWaiters discards the waiters a closing connection registered: nobody is
+// left to receive them, and their timers would otherwise keep the connection
+// reachable for up to a day.
+func (e *sessionEntry) dropWaiters(cn *conn) {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	kept := e.waiters[:0]
+	for _, w := range e.waiters {
+		if w.cn == cn {
+			w.closed = true
+			if w.timer != nil {
+				w.timer.Stop()
+			}
+			continue
+		}
+		kept = append(kept, w)
+	}
+	for i := len(kept); i < len(e.waiters); i++ {
+		e.waiters[i] = nil
+	}
+	e.waiters = kept
 }
 
 // expireWait resolves a waiter on its own timeout, reporting the state as it
@@ -224,7 +270,12 @@ func (cn *conn) handleWait(raw json.RawMessage) {
 	// expireWait resolves once and armWait then declines to enqueue a closed
 	// waiter.
 	w.timer = time.AfterFunc(timeout, func() { e.expireWait(w) })
-	if state, satisfied := e.armWait(w); satisfied {
+	state, satisfied, err := e.armWait(w)
+	if err != nil {
+		cn.sendError(msg.SessionID, protocol.ErrBadWait, err.Error())
+		return
+	}
+	if satisfied {
 		w.resolve(state, false) // E1
 	}
 }
