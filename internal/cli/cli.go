@@ -223,7 +223,19 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return 0
 	}
 	if command == "service" {
-		return service(*state, *listen, *origin, f.Args(), out, diag)
+		// Flags may follow the subcommand (`service install --listen ...`), but
+		// Go's flag parser stopped at the first positional. Pull the subcommand
+		// out and re-parse the rest so the documented order works.
+		rest := f.Args()
+		sub := ""
+		if len(rest) > 0 {
+			sub = rest[0]
+			if err := f.Parse(rest[1:]); err != nil {
+				fmt.Fprintln(diag, "usage: continuum service [install|uninstall|status] [--state DIR] [--listen 127.0.0.1:PORT] [--origin URL]")
+				return 2
+			}
+		}
+		return service(*state, *listen, *origin, []string{sub}, out, diag)
 	}
 	switch command {
 	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":

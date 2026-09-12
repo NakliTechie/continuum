@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/NakliTechie/continuum/internal/journal"
@@ -43,7 +44,7 @@ func service(dir, addr, origin string, args []string, out, diag io.Writer) int {
 func serviceInstall(dir, addr, origin string, out, diag io.Writer) int {
 	// A background daemon on a random port is useless: Menagerie could never
 	// reconnect after a restart. Require a concrete loopback port.
-	if _, port, err := splitHostPortLoose(addr); err != nil || port == "" || port == "0" {
+	if _, port, err := splitHostPortLoose(addr); err != nil || portNum(port) <= 0 {
 		fmt.Fprintln(diag, "service install needs a fixed --listen 127.0.0.1:PORT so Menagerie can reconnect after a restart")
 		return 2
 	}
@@ -113,6 +114,10 @@ func installLaunchd(bin string, argv []string, logPath string, out, diag io.Writ
 		return 5
 	}
 	fmt.Fprintf(out, "Wrote %s\n", plistPath)
+	if dryRun() {
+		fmt.Fprintln(out, "(dry run: not loaded)")
+		return 0
+	}
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	_ = exec.Command("launchctl", "bootout", domain+"/"+launchdLabel).Run() // clean reload
 	if err := exec.Command("launchctl", "bootstrap", domain, plistPath).Run(); err != nil {
@@ -140,6 +145,10 @@ func installSystemd(bin string, argv []string, out, diag io.Writer) int {
 		return 5
 	}
 	fmt.Fprintf(out, "Wrote %s\n", unitPath)
+	if dryRun() {
+		fmt.Fprintln(out, "(dry run: not enabled)")
+		return 0
+	}
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 	if err := exec.Command("systemctl", "--user", "enable", "--now", systemdUnit).Run(); err != nil {
 		fmt.Fprintf(out, "Could not enable the service automatically (%v).\nEnable it yourself with:\n  systemctl --user enable --now %s\n", err, systemdUnit)
@@ -268,8 +277,25 @@ After=network.target
 ExecStart=%s
 Restart=always
 RestartSec=2
+# The daemon's holder subprocesses keep PTY blocks alive across a restart; they
+# live in this unit's cgroup, so only the main process may be signalled on stop.
+KillMode=process
 
 [Install]
 WantedBy=default.target
 `, execStart)
 }
+
+// portNum parses a decimal port, returning 0 for anything not a positive
+// integer (so ":0", ":00", "" and non-numeric ports are all rejected).
+func portNum(p string) int {
+	n, err := strconv.Atoi(p)
+	if err != nil || n <= 0 || n > 65535 {
+		return 0
+	}
+	return n
+}
+
+// dryRun writes the unit file but skips loading it — for previewing an install
+// and for tests that must not register a real service.
+func dryRun() bool { return os.Getenv("CONTINUUM_SERVICE_DRYRUN") != "" }

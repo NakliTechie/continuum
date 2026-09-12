@@ -19,6 +19,13 @@ has nothing to generate). A **fixed** `--listen 127.0.0.1:PORT` is required: a
 background daemon on a random port could never be reached by Menagerie after a
 restart. `--origin URL` is carried through for a hosted Menagerie origin.
 
+Preview without installing anything by setting `CONTINUUM_SERVICE_DRYRUN=1`: the
+unit file is written and its path printed, but nothing is loaded.
+
+On Linux the unit sets `KillMode=process`, so stopping or restarting the service
+signals only the `continuum serve` process — the holder subprocesses that keep
+PTY blocks alive stay running and are re-adopted when the daemon comes back.
+
 This service is **separate from** the legacy `menagerie-relay` service: it uses
 its own label/unit, so installing, checking, or removing one never touches the
 other, and the two can run side by side. Replacing an installed `menagerie-relay`
