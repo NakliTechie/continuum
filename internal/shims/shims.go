@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -44,8 +45,8 @@ func build(name string, args []string, cwd string, env map[string]string) *exec.
 	return cmd
 }
 
-// mergeEnv inherits the relay's environment, ensures TERM is set, then applies
-// caller overrides.
+// mergeEnv inherits the relay's environment, ensures TERM and a UTF-8 character
+// type are set, then applies caller overrides.
 func mergeEnv(env map[string]string) []string {
 	out := append([]string{}, os.Environ()...)
 	if _, ok := env["TERM"]; !ok && !hasEnv(out, "TERM") {
@@ -54,7 +55,50 @@ func mergeEnv(env map[string]string) []string {
 	for k, v := range env {
 		out = append(out, k+"="+v)
 	}
+	if ctype := utf8CType(out); ctype != "" {
+		out = append(out, "LC_CTYPE="+ctype)
+	}
 	return out
+}
+
+// utf8CType returns the LC_CTYPE to add so a line editor in the child treats
+// the UTF-8 that every client sends as characters rather than as meta-prefixed
+// keys (bash's readline in the C locale turns an ellipsis into backward-word).
+// Nothing is added when the environment already declares a UTF-8 charset, or
+// when LC_ALL is set: an explicit operator choice is never overridden.
+func utf8CType(environ []string) string {
+	if hasEnv(environ, "LC_ALL") {
+		return ""
+	}
+	for _, key := range []string{"LC_CTYPE", "LANG"} {
+		if v, ok := lookupEnv(environ, key); ok {
+			if isUTF8Locale(v) {
+				return ""
+			}
+			if key == "LC_CTYPE" {
+				return "" // an explicit non-UTF-8 ctype is the operator's call
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		return "UTF-8" // macOS libc accepts the bare charset; Terminal.app sets the same
+	}
+	return "C.UTF-8"
+}
+
+func isUTF8Locale(v string) bool {
+	v = strings.ToLower(v)
+	return strings.Contains(v, "utf-8") || strings.Contains(v, "utf8")
+}
+
+func lookupEnv(environ []string, key string) (string, bool) {
+	p := key + "="
+	for i := len(environ) - 1; i >= 0; i-- {
+		if strings.HasPrefix(environ[i], p) {
+			return environ[i][len(p):], true
+		}
+	}
+	return "", false
 }
 
 func hasEnv(environ []string, key string) bool {
