@@ -20,6 +20,7 @@ import (
 
 	"github.com/NakliTechie/continuum/api"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/ipc"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/coder/websocket"
 )
@@ -74,8 +75,19 @@ func o4New(t *testing.T, payload []byte, mode string) *o4Harness {
 	mux.Handle("/v1", m)
 	mux.Handle("/", s.Handler())
 	ts := httptest.NewServer(mux)
+	// The CLI under test dials the state directory's socket; serve the same
+	// modern handler there as the daemon would.
+	sock, err := ipc.Listen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewUnstartedServer(m)
+	api.Listener.Close()
+	api.Listener = sock
+	api.Start()
+	t.Cleanup(api.Close)
 	h := &o4Harness{t: t, s: s, m: m, store: store, ts: ts, dir: dir}
-	for name, value := range map[string]string{"endpoint": strings.TrimPrefix(ts.URL, "http://"), "operator.token": "test-registration-token"} {
+	for name, value := range map[string]string{"operator.token": "test-registration-token"} {
 		if err = os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
 			t.Fatal(err)
 		}

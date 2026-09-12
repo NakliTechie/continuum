@@ -64,7 +64,7 @@ printf 'hello\n' | ./bin/continuum input --block BLOCK_ID
 
 Use the block ID returned by `open`. A second `events` command joins as an observer without taking control. Closing these clients leaves the process running. Control expires after 60 seconds; `acquire` obtains unheld control and `takeover` explicitly fences an existing controller. `stop --block BLOCK_ID` uses your saved lease. `status --cursor CURSOR` pages the inventory; `status --block BLOCK_ID` reads one record.
 
-`serve` uses the user's config directory plus `continuum`, a random free loopback port, and private credential files. Use `--state /absolute/private/path` on every command to isolate a workspace. It runs in the foreground and installs no service. Ctrl-C shuts down the daemon and its managed processes. Process groups do not contain commands that deliberately escape into another OS session.
+`serve` uses the user's config directory plus `continuum`, serves the API on a private Unix socket in that directory (`v1.sock`), and opens a random free loopback port for the legacy Menagerie WebSocket only. Credential files are private. Use `--state /absolute/private/path` on every command to isolate a workspace. It runs in the foreground and installs no service. Ctrl-C shuts down the daemon and its managed processes. Process groups do not contain commands that deliberately escape into another OS session.
 
 Metadata and retained history survive restart; processes do not in this alpha. Recovered active records become `interrupted`. History from an unclean daemon epoch is conservatively marked incomplete, including exited blocks; the event API returns an `indeterminate` envelope with the retained events. Retention-expired cursors return `history_gap` and the available range. Fresh work after recovery has its own complete/incomplete record. A storage writer failure refuses further durable mutations. A fault in one ACP reader marks that block’s history incomplete without disabling unrelated controls.
 
@@ -85,7 +85,7 @@ The experimental engine is a bounded Go adapter around Charm's VT implementation
 
 ### Use with Menagerie
 
-Point Menagerie's manual Add relay form at `ws://` plus the address printed by `serve`. Use the operator credential in the private state directory's `operator.token`. For a local browser origin, start `serve --origin http://127.0.0.1:PORT`. Hosted Menagerie origins retain their existing allowlist. Never put this alpha on a public listener.
+Point Menagerie's manual Add relay form at the `ws://` address printed by `serve` (the legacy WebSocket; the CLI's own API is not on TCP). Use the operator credential in the private state directory's `operator.token`. For a local browser origin, start `serve --origin http://127.0.0.1:PORT`. Hosted Menagerie origins retain their existing allowlist. Never put this alpha on a public listener.
 
 Menagerie's existing browser still uses trusted legacy takeover behavior. A Continuum observer does not steal its token, but an explicit browser reattach fences modern control. A legacy browser may need reconnecting to discover sessions opened elsewhere. Browser folder storage and daemon history are separate; skipping browser storage does not disable daemon capture.
 

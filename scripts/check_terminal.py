@@ -111,7 +111,7 @@ def main():
             def text():return ''.join(screen()['frame']['lines'])
             try:
                 daemon=subprocess.Popen([str(binary),'serve','--state',str(state)],env=env,stdout=log,stderr=log,start_new_session=True)
-                wait_until('daemon did not start',lambda:(state/'endpoint').exists())
+                wait_until('daemon did not start',lambda:(state/'v1.sock').exists())
                 status=rpc('status')['result']
                 assert {'terminal_screen_v1','terminal_input_base64','control_renewal'}<=set(status['capabilities'])
                 opened=rpc('open','--terminal','screen-v1','--cwd',str(root),'--',sys.executable,'-c',CHILD)['result']
