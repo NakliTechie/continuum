@@ -57,7 +57,9 @@ def main():
             assert b'First use' in help_text
             assert rpc('status', code=5)['code'] == 'daemon_not_running'
             daemon = start()
-            contract = rpc('contract')['result']
+            contract_env = rpc('contract')
+            assert 'request_id' not in contract_env, 'contract is a read; it must not carry a request_id'
+            contract = contract_env['result']
             assert contract['contract'] == 'continuum/v1' and contract['contract_version'] == '1.0' and contract['schema_version'] == 1, contract
             assert 'pty' in contract['capabilities']['stable'] and 'terminal_screen_v1' in contract['capabilities']['experimental'], contract
             assert contract['process_restart_survival'] is True, contract

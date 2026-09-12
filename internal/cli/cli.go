@@ -59,6 +59,7 @@ Commands:
   resize --block ID --cols N --rows N
   stop --block ID          stop work using your saved lease
   version                  show build version
+  service SUB              install/uninstall/status the always-on Continuum daemon (launchd/systemd)
   legacy SUBCOMMAND        Menagerie relay commands (serve, agents, token, service, materialise)
 
 Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
@@ -76,6 +77,10 @@ Menagerie can use the same daemon's legacy WebSocket endpoint with operator.toke
 No service is installed. Remote listeners and untrusted multi-user hosting are unsupported.
 `
 
+// splitHostPortLoose splits an address without failing on a missing port.
+func splitHostPortLoose(addr string) (host, port string, err error) {
+	return net.SplitHostPort(addr)
+}
 func defaultState() string {
 	d, err := os.UserConfigDir()
 	if err != nil {
@@ -194,8 +199,8 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		fmt.Fprintln(diag, "--state must be an absolute directory")
 		return 2
 	}
-	if command != "serve" && (set["listen"] || set["origin"]) {
-		fmt.Fprintln(diag, "--listen and --origin are for serve")
+	if command != "serve" && command != "service" && (set["listen"] || set["origin"]) {
+		fmt.Fprintln(diag, "--listen and --origin are for serve and service")
 		return 2
 	}
 	if (set["cols"] || set["rows"]) && command != "resize" && command != "open" {
@@ -216,6 +221,9 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			return 5
 		}
 		return 0
+	}
+	if command == "service" {
+		return service(*state, *listen, *origin, f.Args(), out, diag)
 	}
 	switch command {
 	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
@@ -280,7 +288,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		operation = "version" // /v1 op name; `continuum version` stays the local build-version print
 	}
 	q := api.Request{Terminal: *profile, Cursor: *cursor, Operation: operation, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
-	mut := !readOperation(command)
+	mut := !readOperation(operation) // classify by the /v1 op (contract → version is a read)
 	if mut && q.RequestID == "" {
 		q.RequestID = journal.ID()
 	}
