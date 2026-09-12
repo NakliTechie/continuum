@@ -31,6 +31,7 @@ import (
 
 	"github.com/NakliTechie/continuum/internal/acp"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/holder"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/protocol"
@@ -317,6 +318,9 @@ func (s *Server) runSession(id string, sess *pty.Session) {
 			c := code
 			s.deliverEvent(id, protocol.EventExited, &c)
 			s.removeSession(id)
+			if s.cfg.HoldersState != "" {
+				holder.Forget(s.cfg.HoldersState, id)
+			}
 			log.Printf("exited %s (code=%d)", id, code)
 		},
 	)
@@ -368,7 +372,7 @@ func (s *Server) detach(cn *conn) {
 
 // deliverOutput routes a session's output to its current subscriber.
 func (s *Server) deliverOutput(id string, seq int, b []byte) {
-	s.record(id, "output", map[string]any{"encoding": "base64", "data": base64.StdEncoding.EncodeToString(b)})
+	s.recordOutput(id, b, false)
 	e := s.entry(id)
 	if e == nil {
 		return
@@ -870,12 +874,17 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 	}
 
 	var sess *pty.Session
-	if cn.terminal == nil {
-		sess, err = pty.Start(id, msg.Agent, cmd, s.cfg.CaptureDir)
-	} else {
+	if cn.terminal != nil {
 		// The profile advertises a conventional 256-color terminal; engine identity
 		// and its experimental limitations remain discoverable through /v1.
 		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+	}
+	switch {
+	case s.cfg.HoldersState != "" && tmuxName == "":
+		sess, err = s.startHeld(id, msg.Agent, cmd, cn.terminal)
+	case cn.terminal == nil:
+		sess, err = pty.Start(id, msg.Agent, cmd, s.cfg.CaptureDir)
+	default:
 		sess, err = pty.StartTerminal(id, msg.Agent, cmd, *cn.terminal, s.cfg.CaptureDir)
 	}
 	if err != nil {
@@ -1042,8 +1051,12 @@ func (s *Server) queueStructuredEvent(e *sessionEntry, id, event string, code *i
 }
 
 const (
-	outboxCapacity     = 384 // ≥ tailCapacity so a re-attach replay always fits
-	tailCapacity       = 256
+	// A chatty ACP turn is thousands of frames (thought chunks, session_info
+	// updates); a 256-frame tail lost the tool-call rows before the turn ended,
+	// so a second client attached to only the closing message (CU7, live run
+	// 2026-09-12). The byte cap is what bounds memory; frames match the journal.
+	outboxCapacity     = tailCapacity + 256 // ≥ tailCapacity so a re-attach replay always fits
+	tailCapacity       = 2048
 	outboxByteCapacity = 16 << 20
 	tailByteCapacity   = 16 << 20
 )

@@ -4,6 +4,7 @@ package journal
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -106,7 +107,7 @@ func Open(dir string) (*Store, error) {
 		if err := meta.Put([]byte("schema"), []byte("1")); err != nil {
 			return err
 		}
-		for _, name := range []string{"blocks", "events", "operations", "operation_order"} {
+		for _, name := range []string{"blocks", "events", "operations", "operation_order", "output_bytes"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return err
 			}
@@ -211,6 +212,11 @@ func retireBlock(tx *bolt.Tx, id string) error {
 	if err := tx.Bucket([]byte("blocks")).Delete([]byte(id)); err != nil {
 		return err
 	}
+	if ob := tx.Bucket([]byte("output_bytes")); ob != nil {
+		if err := ob.Delete([]byte(id)); err != nil {
+			return err
+		}
+	}
 	events := tx.Bucket([]byte("events"))
 	meta := tx.Bucket([]byte("meta"))
 	size := num(meta.Get([]byte("event_bytes")))
@@ -259,7 +265,30 @@ func (s *Store) Blocks() ([]Block, error) {
 const MaxStructuredPayload = (8 << 20) + (64 << 10)
 
 func (s *Store) Append(id, kind string, payload any) error {
-	return s.appendBounded(id, kind, payload, 256<<10)
+	return s.appendBounded(id, kind, payload, 256<<10, 0)
+}
+
+// AppendOutput records a PTY output chunk and advances the block's durable
+// lifetime output-byte counter. That counter — never decremented by event
+// retention — is the resume offset a holder streams from after a daemon
+// restart, so replay stays contiguous and non-duplicated even once the oldest
+// output events have been retired.
+func (s *Store) AppendOutput(id string, b []byte, unobserved bool) error {
+	payload := map[string]any{"encoding": "base64", "data": base64.StdEncoding.EncodeToString(b)}
+	if unobserved {
+		payload["unobserved"] = true
+	}
+	return s.appendBounded(id, "output", payload, 256<<10, len(b))
+}
+
+// OutputBytes returns the block's lifetime committed output-byte count.
+func (s *Store) OutputBytes(block string) (int, error) {
+	var n uint64
+	err := s.db.View(func(tx *bolt.Tx) error {
+		n = num(tx.Bucket([]byte("output_bytes")).Get([]byte(block)))
+		return nil
+	})
+	return int(n), err
 }
 
 // AppendStructured retains a complete accepted frame. Ordinary event payloads
@@ -268,10 +297,10 @@ func (s *Store) AppendStructured(id, kind string, payload any) error {
 	if kind != "session_update" && kind != "permission_request" {
 		return fmt.Errorf("not a structured frame kind: %s", kind)
 	}
-	return s.appendBounded(id, kind, payload, MaxStructuredPayload)
+	return s.appendBounded(id, kind, payload, MaxStructuredPayload, 0)
 }
 
-func (s *Store) appendBounded(id, kind string, payload any, limit int) error {
+func (s *Store) appendBounded(id, kind string, payload any, limit, outLen int) error {
 	raw, err := jsonwire.Marshal(payload)
 	if err != nil {
 		return err
@@ -313,6 +342,12 @@ func (s *Store) appendBounded(id, kind string, payload any, limit int) error {
 		}
 		if err := meta.Put([]byte("event_bytes"), key(size)); err != nil {
 			return err
+		}
+		if outLen > 0 {
+			ob := tx.Bucket([]byte("output_bytes"))
+			if err := ob.Put([]byte(id), key(num(ob.Get([]byte(id)))+uint64(outLen))); err != nil {
+				return err
+			}
 		}
 		if kind == "exited" {
 			blocks := tx.Bucket([]byte("blocks"))

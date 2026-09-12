@@ -23,6 +23,7 @@ import (
 
 	"github.com/NakliTechie/continuum/api"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/holder"
 	"github.com/NakliTechie/continuum/internal/ipc"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/server"
@@ -67,7 +68,7 @@ Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into ser
 Attach: --observer is read-only; --takeover explicitly replaces a controller.
 Keyboard only; complex Unicode and advanced TUI compatibility are experimental.
 
-This alpha recovers records after daemon restart; running processes do not survive.
+This alpha recovers records and running PTY processes after daemon restart (structured agent sessions do not survive yet).
 Menagerie can use the same daemon's legacy WebSocket endpoint with operator.token.
 No service is installed. Remote listeners and untrusted multi-user hosting are unsupported.
 `
@@ -140,6 +141,10 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if args[0] == "version" {
 		fmt.Fprintln(out, "continuum "+Version)
 		return 0
+	}
+	if args[0] == holder.Subcommand {
+		// The daemon re-executes itself as a block holder; never a user command.
+		return holder.Main(in)
 	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -493,6 +498,7 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	cfg.RegistrationToken = token
 	cfg.Tmux = "off"
 	cfg.AdoptForeignTmux = false
+	cfg.HoldersState = dir
 	disabled := ""
 	cfg.CaptureDir = &disabled
 	cfg.Listen = addr
@@ -504,6 +510,8 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	cfg.ResolveAgents(nil)
 	srv := server.New(cfg)
 	modern := srv.EnableModern(store, observer)
+	// Blocks a previous daemon left running come back before any door opens.
+	srv.AdoptHolders()
 	// Two doors, one registry: the modern API on a private Unix socket in the
 	// state directory; the legacy Menagerie WebSocket on a loopback TCP port,
 	// which is the only thing a browser can reach.

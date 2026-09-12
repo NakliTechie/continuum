@@ -112,20 +112,68 @@ def main():
 
             rpc('resize', '--block', block, '--cols', '120', '--rows', '40')
             rpc('stop', '--block', block)
-            # Crash tests actual record recovery, not just a graceful close.
+            assert rpc('status')['result']['process_restart_survival'] is True
+            # A block that keeps talking while no daemon is alive: its holder must
+            # keep the process and the unobserved output.
+            ticker = rpc('open', '--cwd', str(root), '--', '/bin/sh', '-c',
+                         'i=0; while :; do i=$((i+1)); echo tick $i; sleep 0.05; done')['result']
+            # A block that exits while no daemon is alive leaves an exit record.
+            leaver = rpc('open', '--cwd', str(root), '--', '/bin/sh', '-c', 'sleep 0.4; echo late-words; exit 7')['result']
+            time.sleep(.2)
+            # Crash tests actual record recovery, not just a graceful close: SIGKILL
+            # to the daemon alone; holders and their children are on their own.
             daemon.kill()
             daemon.wait(timeout=3)
+            time.sleep(.8)
+            assert os.path.exists(f'/proc/{ticker["pid"]}') if os.path.isdir('/proc') else os.kill(ticker['pid'], 0) is None
             daemon = start()
             recovered = rpc('status')['result']
             assert recovered['host_id'] == initial['host_id']
             old = next(b for b in recovered['blocks'] if b['id'] == offline['block_id'])
-            assert old['state'] == 'interrupted'
+            assert old['state'] == 'active' and old['pid'] == offline['pid'], old
+            assert old['history_incomplete'] is True
             uncertain = rpc('events', '--block', offline['block_id'], code=8)
             assert uncertain['result']['incomplete']
+            kinds = [e['type'] for e in uncertain['result']['events']]
+            assert 'adopted' in kinds and 'exited' not in kinds, kinds
             replay = b''.join(base64.b64decode(e['payload']['data']) for e in uncertain['result']['events'] if e['type'] == 'output')
             assert b'offline-marker' in replay
+            # The adopted block still takes input from the new daemon.
+            rpc('acquire', '--block', offline['block_id'])
+            rpc('input', '--block', offline['block_id'], data=b'after-restart\n')
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                page = rpc('events', '--block', offline['block_id'], code=8)['result']['events']
+                if any(b'after-restart' in base64.b64decode(e['payload']['data']) for e in page if e['type'] == 'output'):
+                    break
+                time.sleep(.03)
+            else:
+                raise AssertionError('adopted block did not echo input after restart')
+            live = next(b for b in recovered['blocks'] if b['id'] == ticker['block_id'])
+            assert live['state'] == 'active' and live['pid'] == ticker['pid'], live
+            ticks = rpc('events', '--block', ticker['block_id'], code=8)['result']['events']
+            adopted = next(e for e in ticks if e['type'] == 'adopted')
+            assert adopted['payload']['held'] and adopted['payload']['gap_bytes'] > 0 and adopted['payload']['dropped_bytes'] == 0, adopted
+            numbers = [int(n) for e in ticks if e['type'] == 'output'
+                       for n in base64.b64decode(e['payload']['data']).decode().replace('\r', '').split()
+                       if n.isdigit()]
+            assert numbers == list(range(1, len(numbers) + 1)), f'ticks not contiguous across the restart: {numbers[:40]}'
+            gone = next(b for b in recovered['blocks'] if b['id'] == leaver['block_id'])
+            assert gone['state'] == 'exited', gone
+            left = rpc('events', '--block', leaver['block_id'], code=8)['result']['events']
+            assert [e['type'] for e in left][-2:] == ['adopted', 'exited'] and left[-1]['payload']['exit_code'] == 7, left[-3:]
+            unobserved = [e for e in left if e['type'] == 'output' and e['payload'].get('unobserved')]
+            assert unobserved and b'late-words' in b''.join(base64.b64decode(e['payload']['data']) for e in unobserved), 'downtime tail must be journaled unobserved'
+            rpc('acquire', '--block', ticker['block_id'])
+            rpc('stop', '--block', ticker['block_id'])
+            rpc('stop', '--block', offline['block_id'])
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and any(b['state'] == 'active' for b in rpc('status')['result']['blocks']):
+                time.sleep(.03)
+            assert not any(b['state'] == 'active' for b in rpc('status')['result']['blocks'])
+            assert not any(p.suffix == '.sock' for p in (state / 'holders').iterdir()), 'holders left sockets behind'
             assert not (root / '.menagerie').exists(), 'modern mode wrote legacy home'
-            print('PASS: first run, auth, one writer, idempotency, two observers, control, offline replay, crash recovery, isolated capture')
+            print('PASS: first run, auth, one writer, idempotency, two observers, control, offline replay, crash survival with holders, isolated capture')
         finally:
             for process, output in followers:
                 process.kill()

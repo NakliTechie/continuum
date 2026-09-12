@@ -113,7 +113,11 @@ type Config struct {
 	// config keeps Menagerie's home capture directory; a programmatic config
 	// captures nothing (server.New disables it), so tests and embedders never
 	// write into the installed relay's directory by omission.
-	CaptureDir        *string          `toml:"-"`
+	CaptureDir *string `toml:"-"`
+	// HoldersState, when set to the daemon's state directory, runs every PTY
+	// block under a holder process that outlives the daemon (see internal/holder).
+	// Empty keeps the legacy in-process child. Programmatic only.
+	HoldersState      string           `toml:"-"`
 	Name              string           `toml:"name"`
 	Listen            string           `toml:"listen"`
 	TLSCert           string           `toml:"tls_cert"`

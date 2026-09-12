@@ -40,9 +40,10 @@ type Session struct {
 	termFault     string
 	killRequested atomic.Bool
 
-	ptmx *os.File
-	cmd  *exec.Cmd
-	cap  *os.File // append-only capture: ~/.menagerie/sessions/<id>.pty
+	ptmx   *os.File
+	readFn func([]byte) (int, error) // output source: the PTY, or a holder's stream
+	wait   func() int                // reaps the leader, or reads the holder's exit report
+	cap    *os.File                  // append-only capture: ~/.menagerie/sessions/<id>.pty
 
 	mu     sync.Mutex
 	seq    int
@@ -87,15 +88,51 @@ func start(id, agent string, cmd *exec.Cmd, opts *TerminalOptions, capture ...*s
 		}
 		return nil, err
 	}
+	_ = SetUTF8(ptmx) // best effort; the child still runs without it
 	s := &Session{
+		readFn:    nil, // set below to readPTY once s exists
 		term:      engine,
 		ID:        id,
 		Agent:     agent,
 		StartedAt: time.Now(),
 		PID:       cmd.Process.Pid,
 		ptmx:      ptmx,
-		cmd:       cmd,
+		wait: func() int {
+			if err := cmd.Wait(); err != nil {
+				if ee, ok := err.(*exec.ExitError); ok {
+					return ee.ExitCode()
+				}
+				return -1
+			}
+			return 0
+		},
 	}
+	s.readFn = s.readPTY
+	s.openCapture(capture)
+	return s, nil
+}
+
+// Held wraps a PTY master received from a block holder: the child is the
+// holder's, so wait reads the holder's exit report instead of reaping. gap is
+// output the holder drained while no daemon was attached; it seeds the replay
+// tail and, for a server-owned screen, the rebuilt frame.
+func Held(id, agent string, ptmx *os.File, pid int, startedAt time.Time, output io.Reader, wait func() int, opts *TerminalOptions, capture ...*string) (*Session, error) {
+	var engine terminal.Engine
+	if opts != nil {
+		var err error
+		if engine, err = terminal.New(opts.Cols, opts.Rows); err != nil {
+			return nil, err
+		}
+	}
+	s := &Session{term: engine, ID: id, Agent: agent, StartedAt: startedAt, PID: pid, ptmx: ptmx, wait: wait}
+	// The daemon never reads the master (the holder is the sole reader); output
+	// arrives over the holder stream and is journaled here as it always was.
+	s.readFn = func(b []byte) (int, error) { return output.Read(b) }
+	s.openCapture(capture)
+	return s, nil
+}
+
+func (s *Session) openCapture(capture []*string) {
 	dir, capErr := SessionsDir()
 	if len(capture) > 0 && capture[0] != nil {
 		dir = *capture[0]
@@ -103,10 +140,9 @@ func start(id, agent string, cmd *exec.Cmd, opts *TerminalOptions, capture ...*s
 	}
 	if capErr == nil && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err == nil {
-			s.cap, _ = os.OpenFile(filepath.Join(dir, id+".pty"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			s.cap, _ = os.OpenFile(filepath.Join(dir, s.ID+".pty"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		}
 	}
-	return s, nil
 }
 
 // Run pumps PTY output to onData (raw bytes + a monotonic per-session seq) and
@@ -149,14 +185,7 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 			break // EOF when the child exits, or PTY closed
 		}
 	}
-	code := 0
-	if err := s.cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else {
-			code = -1
-		}
-	}
+	code := s.wait()
 	// Wait reaps the leader, but SIGKILL delivery and orphan reaping for its
 	// process group can lag it. Bound that drain before announcing explicit
 	// group shutdown; normal child exit incurs no extra wait.
@@ -216,9 +245,12 @@ func (s *Session) Write(b []byte) error {
 	return nil
 }
 
-// read uses a short poll while holding the file reference. Descriptor closure
+// read pulls the next output bytes from the session's source.
+func (s *Session) read(b []byte) (int, error) { return s.readFn(b) }
+
+// readPTY uses a short poll while holding the file reference. Descriptor closure
 // cannot race reuse, and no blocking read prevents the daemon from stopping.
-func (s *Session) read(b []byte) (int, error) {
+func (s *Session) readPTY(b []byte) (int, error) {
 	raw, err := s.ptmx.SyscallConn()
 	if err != nil {
 		return 0, err
@@ -311,15 +343,15 @@ func (s *Session) resizePTY(cols, rows int) error {
 // Kill sends SIGKILL to the managed process group.
 func (s *Session) Kill() {
 	s.killRequested.Store(true)
-	if s.cmd.Process != nil {
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+	if s.PID > 0 {
+		_ = syscall.Kill(-s.PID, syscall.SIGKILL)
 	}
 }
 
 // Interrupt sends SIGINT to the agent process.
 func (s *Session) Interrupt() {
-	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Signal(os.Interrupt)
+	if s.PID > 0 {
+		_ = syscall.Kill(s.PID, syscall.SIGINT)
 	}
 }
 

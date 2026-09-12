@@ -54,6 +54,13 @@ func (s *Server) record(id, kind string, payload any) {
 		}
 	}
 }
+func (s *Server) recordOutput(id string, b []byte, unobserved bool) {
+	if m := s.modern; m != nil {
+		if err := m.Store.AppendOutput(id, b, unobserved); err != nil {
+			m.degraded.Store(true)
+		}
+	}
+}
 func (s *Server) recordStructured(id, kind string, payload any) {
 	if m := s.modern; m != nil {
 		raw, err := jsonwire.Marshal(payload)
@@ -192,7 +199,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			next = b.ID
 		}
 		blocks = page
-		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1", "terminal_input_base64", "control_renewal"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": false})
+		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1", "terminal_input_base64", "control_renewal"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": m.s.cfg.HoldersState != ""})
 		return v
 	case "events":
 		p, err := m.Store.Read(q.After, q.Block)
