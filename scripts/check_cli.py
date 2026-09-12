@@ -41,7 +41,7 @@ def main():
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     raise AssertionError('daemon exited before ready')
-                if (state / 'endpoint').exists():
+                if (state / 'v1.sock').exists():
                     try:
                         probe = subprocess.run([str(binary), 'status', '--state', str(state), '--json'], env=env, capture_output=True, timeout=2)
                     except subprocess.TimeoutExpired:

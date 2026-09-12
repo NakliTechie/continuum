@@ -19,6 +19,7 @@ The baseline runner uses the existing local Menagerie Git object database, extra
 | Attention | Another inventory read preserves done; explicit seen moves done to idle. |
 | Approval guard | While the fake ACP agent asks permission, a task prompt is refused with session_blocked; explicit permission response completes the turn. |
 | Subtree kill | Parent and child both exit after an authorized subtree stop. |
+| Restart with tmux | With `tmux = "on"` the agent outlives the relay process: after the relay is killed and restarted, the inventory lists the session, a client attaches with a fresh token, and input reaches the same process — the agent echoes its own PID, which must match before and after. This is the restart/tmux cell of the compatibility matrix; it runs against the pinned baseline and the candidate. |
 
 Legacy PTY input is raw UTF-8 in `input.data`; output is base64 in `output.data`. Preserve this directional asymmetry.
 
@@ -26,7 +27,7 @@ Frame waits have one overall deadline and a frame-count cap; unrelated output ca
 
 ## Boundaries
 
-This suite covers loopback macOS/Linux execution with tmux off and a fake ACP process. It does not validate browser rendering, real provider behavior, tmux adoption across restart, full history recovery, operating-system login, multiple read-only viewers, WAN resilience, or the future adapter against every legacy frame. Add those cases as the corresponding slice arrives; this is not a complete migration gate.
+This suite covers loopback macOS/Linux execution with a fake ACP process; tmux is off except for the restart case, which runs a private tmux server. It does not validate browser rendering, real provider behavior, full history recovery, operating-system login, multiple read-only viewers, WAN resilience, or the future adapter against every legacy frame. Add those cases as the corresponding slice arrives; this is not a complete migration gate.
 
 The future runtime can be supplied through explicit executable paths; the documented baseline runner establishes the current reference. Never point the suite at a live daemon: it always launches its own child from the supplied executable.
 
@@ -44,13 +45,13 @@ For a future candidate runtime, build a compatible fake ACP helper and set absol
 
 ## Observed validation — 2026-09-09
 
-The baseline runner verified all 42 hashes at Menagerie revision `837a3ee5fcf92c71a84dfefce062e6a9cf9a2457`, built disposable relay/fake-agent executables and passed all six Go integration tests on macOS (test-client race detector enabled). This includes PTY output emitted while every WebSocket client was disconnected and replayed after reconnect to the same PID. Linux, real provider agents, browser compatibility and the future Continuum runtime were not exercised.
+The baseline runner verified all 42 hashes at Menagerie revision `837a3ee5fcf92c71a84dfefce062e6a9cf9a2457`, built disposable relay/fake-agent executables and passed all six Go integration tests of that date (a seventh, restart with tmux, was added 2026-09-12 and passes on the same baseline) on macOS (test-client race detector enabled). This includes PTY output emitted while every WebSocket client was disconnected and replayed after reconnect to the same PID. Linux, real provider agents, browser compatibility and the future Continuum runtime were not exercised.
 
 The initial run exposed a test-client encoding mistake: legacy input uses raw text, while output uses base64. Correcting the test client produced the passing run; no Menagerie implementation change was needed.
 
 ## Candidate runtime validation — 2026-09-09
 
-All six unchanged black-box tests also passed against the Continuum-built candidate relay after the import and runtime corrections. `python3 scripts/verify.py verify legacy` now rebuilds that candidate in temporary storage. The upstream-baseline runner remains independent and pinned. A separate Chrome walk exercised the unchanged Menagerie app against the alpha daemon: add relay, spawn custom `/bin/cat`, send text and recover that output through the CLI. This does not establish every browser or mixed-version migration case.
+All black-box tests (six then, seven now) also passed against the Continuum-built candidate relay after the import and runtime corrections. `python3 scripts/verify.py verify legacy` now rebuilds that candidate in temporary storage. The upstream-baseline runner remains independent and pinned. A separate Chrome walk exercised the unchanged Menagerie app against the alpha daemon: add relay, spawn custom `/bin/cat`, send text and recover that output through the CLI. This does not establish every browser or mixed-version migration case.
 
 ## Registration rotation
 

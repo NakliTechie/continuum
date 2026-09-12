@@ -4,7 +4,7 @@
 
 Repository: https://github.com/NakliTechie/menagerie
 Revision: `837a3ee5fcf92c71a84dfefce062e6a9cf9a2457`.
-Local source: `~/Code/menagerie`.
+Local source: a sibling Menagerie checkout (`../menagerie`).
 Go module: `github.com/NakliTechie/menagerie/relay-go`, Go `1.26.2`.
 Relay declaration: `0.6.0`; protocol: `1.3`. New workspace code on main does not establish inclusion in the released 0.6.0 artifact.
 

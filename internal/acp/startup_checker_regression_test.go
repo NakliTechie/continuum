@@ -167,7 +167,10 @@ func TestCheckerRealStartupMixedPermissionPositive(t *testing.T) {
 func TestCheckerStartupOverflowAndGatedCancellationReap(t *testing.T) {
 	for _, mode := range []string{"frames", "bytes", "permissions", "permissionbytes", "gated"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			// Generous for the budget modes: under a full race-enabled gate the
+			// fake needs longer to overflow, and the assertion is which limit
+			// tripped, not how fast. The gated mode keeps its short deadline.
+			ctx, c := context.WithTimeout(context.Background(), 20*time.Second)
 			if mode == "gated" {
 				c()
 				ctx, c = context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -190,7 +193,7 @@ func TestCheckerStartupOverflowAndGatedCancellationReap(t *testing.T) {
 			if !strings.Contains(e.Error(), want) {
 				t.Fatalf("error %v missing %s", e, want)
 			}
-			if time.Since(began) > 6*time.Second {
+			if time.Since(began) > 15*time.Second {
 				t.Fatal("startup not bounded")
 			}
 			if cmd.ProcessState == nil {

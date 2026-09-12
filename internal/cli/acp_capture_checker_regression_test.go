@@ -21,14 +21,14 @@ func TestO4CheckerResponseBounds(t *testing.T) {
 	}{{"events", (16 << 20) - 1024, true}, {"events", (16 << 20) + 1, false}, {"status", (1 << 20) - 1024, true}, {"status", (1 << 20) + 1, false}} {
 		t.Run(c.op+"/"+map[bool]string{true: "below", false: "above"}[c.accept], func(t *testing.T) {
 			dir := t.TempDir()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				enc := json.NewEncoder(w)
 				enc.SetEscapeHTML(false)
 				_ = enc.Encode(api.Result("o4", map[string]string{"data": strings.Repeat("x", c.n)}))
 			}))
-			defer server.Close()
-			for name, value := range map[string]string{"endpoint": strings.TrimPrefix(server.URL, "http://"), "operator.token": "disposable"} {
+			serveOnSocket(t, server, dir)
+			for name, value := range map[string]string{"operator.token": "disposable"} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
 					t.Fatal(err)
 				}

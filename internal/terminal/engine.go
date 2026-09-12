@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -76,8 +77,14 @@ type emulator struct {
 	// cached is the last frame built, reused while the revision holds: a
 	// viewer polling an idle screen must not rebuild 19,200 cells under the
 	// same lock the output pump needs.
-	cached        *Snapshot
-	cachedRev     uint64
+	cached    *Snapshot
+	cachedRev uint64
+	// held is the frame published while the application has synchronized
+	// output (DEC private mode 2026) set: viewers keep seeing the screen as it
+	// was before the update began, never a half-drawn one. holdUntil bounds
+	// it so an unclosed pair cannot freeze viewers.
+	held          *Snapshot
+	holdUntil     time.Time
 	cursor        Cursor
 	modes         Modes
 	modeSet       map[ansi.Mode]bool
@@ -114,14 +121,41 @@ func New(cols, rows int) (Engine, error) {
 	e.vt.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(v bool) { e.cursor.Visible = v },
 		CursorStyle:      func(s vt.CursorStyle, b bool) { e.cursor.Style = int(s); e.cursor.Blink = b },
-		EnableMode:       func(m ansi.Mode) { e.modeSet[m] = true; e.updateModes() },
-		DisableMode:      func(m ansi.Mode) { delete(e.modeSet, m); e.updateModes() },
+		EnableMode: func(m ansi.Mode) {
+			e.modeSet[m] = true
+			e.updateModes()
+			if m == ansi.ModeSynchronizedOutput && e.held == nil {
+				e.beginHold()
+			}
+		},
+		DisableMode: func(m ansi.Mode) {
+			delete(e.modeSet, m)
+			e.updateModes()
+			if m == ansi.ModeSynchronizedOutput {
+				e.held = nil
+			}
+		},
 	})
 	// The library's pipe is synchronous. Drain it even with zero viewers. Closing
 	// the pipe and joining this reader BEFORE vt.Close avoids its closed-flag race.
 	go e.drain()
 	return e, nil
 }
+
+// SyncHoldCeiling bounds how long a synchronized-output hold may keep viewers
+// on the previous frame: long enough for a real TUI's redraw, short enough
+// that an application which sets 2026 and stalls does not freeze its viewers.
+const SyncHoldCeiling = 150 * time.Millisecond
+
+// beginHold publishes the current screen for the duration of a synchronized
+// update. It runs inside a Feed under e.mu (the mode callback fires from
+// vt.Write), so it renders without locking.
+func (e *emulator) beginHold() {
+	frame := e.buildLocked()
+	e.held = &frame
+	e.holdUntil = time.Now().Add(SyncHoldCeiling)
+}
+
 func (e *emulator) updateModes() {
 	e.modes = Modes{CursorKeys: e.modeSet[ansi.ModeCursorKeys], BracketedPaste: e.modeSet[ansi.ModeBracketedPaste], Focus: e.modeSet[ansi.ModeFocusEvent]}
 	for _, m := range []ansi.Mode{ansi.ModeMouseX10, ansi.ModeMouseNormal, ansi.ModeMouseHighlight, ansi.ModeMouseButtonEvent, ansi.ModeMouseAnyEvent} {
@@ -227,6 +261,12 @@ func (e *emulator) Resize(cols, rows int) ([]byte, error) {
 func (e *emulator) Snapshot() Snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.held != nil {
+		if time.Now().Before(e.holdUntil) {
+			return copyFrame(e.held, e.fault)
+		}
+		e.held = nil // the application never released the hold; show what there is
+	}
 	if e.cached != nil && e.cachedRev == e.revision {
 		// Callers own their frame: the row slices are copied (string headers
 		// only), the cells are not rebuilt.
@@ -238,6 +278,27 @@ func (e *emulator) Snapshot() Snapshot {
 		}
 		return s
 	}
+	s := e.buildLocked()
+	frame := s
+	frame.Lines = append([]string(nil), s.Lines...)
+	frame.ANSI = append([]string(nil), s.ANSI...)
+	e.cached, e.cachedRev = &frame, e.revision
+	return s
+}
+
+// copyFrame hands a caller its own frame: row slices copied, fault current.
+func copyFrame(f *Snapshot, fault error) Snapshot {
+	s := *f
+	s.Lines = append([]string(nil), f.Lines...)
+	s.ANSI = append([]string(nil), f.ANSI...)
+	if fault != nil {
+		s.Fault = fault.Error()
+	}
+	return s
+}
+
+// buildLocked renders the visible screen; the caller holds e.mu.
+func (e *emulator) buildLocked() Snapshot {
 	s := Snapshot{Engine: Name, Revision: e.revision, Cols: e.vt.Width(), Rows: e.vt.Height(), Alternate: e.vt.IsAltScreen(), Cursor: e.cursor, Modes: e.modes, Scrollback: e.vt.ScrollbackLen()}
 	pos := e.vt.CursorPosition()
 	s.Cursor.X = pos.X
@@ -274,10 +335,6 @@ func (e *emulator) Snapshot() Snapshot {
 		s.Lines[y] = plain.String()
 		s.ANSI[y] = styled.String()
 	}
-	frame := s
-	frame.Lines = append([]string(nil), s.Lines...)
-	frame.ANSI = append([]string(nil), s.ANSI...)
-	e.cached, e.cachedRev = &frame, e.revision
 	return s
 }
 func (e *emulator) Close() error {

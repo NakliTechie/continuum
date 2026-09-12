@@ -1,6 +1,6 @@
 # Continuum
 
-> **Lifecycle:** living — local alpha implemented on the development branch; broader first-release work remains.
+> **Lifecycle:** living — local alpha on `main` (private daemon + CLI, legacy Menagerie compatibility); not yet a release. Source is public so Menagerie can depend on it directly; there is no installer, no service cutover, and no stability promise for the `/v1` contract yet. Licensed AGPL-3.0 (see LICENSE and NOTICE for the Menagerie relay lineage).
 
 A durable runtime for local and remote work. Terminals, coding agents, background jobs, and services share sessions, history, structured events, and controls that people and software can use equally.
 
@@ -40,7 +40,7 @@ The branch imports the runtime with history and attribution preserved; installed
 
 The development build is `0.1.0-alpha.2-dev`. The overnight branch extends the local alpha with opt-in server-owned terminal screens and interactive CLI attachment. The Go runtime was imported with Menagerie's subtree history preserved. Both adapters use the same session registry. No installed relay or service has been migrated.
 
-The automated gate covers the core with Go's race detector, a real CLI journey and six legacy black-box compatibility cases. A Chrome walk connected the unchanged Menagerie app to the new daemon, spawned `/bin/cat`, and replayed its browser-entered output from the CLI. Linux binaries are cross-build targets; native Linux execution and real model-provider sessions need separate validation.
+The automated gate covers the core with Go's race detector, a real CLI journey and seven legacy black-box compatibility cases. A Chrome walk connected the unchanged Menagerie app to the new daemon, spawned `/bin/cat`, and replayed its browser-entered output from the CLI. Linux binaries are cross-build targets; native Linux execution and real model-provider sessions need separate validation.
 
 ### Build and try
 
@@ -64,11 +64,11 @@ printf 'hello\n' | ./bin/continuum input --block BLOCK_ID
 
 Use the block ID returned by `open`. A second `events` command joins as an observer without taking control. Closing these clients leaves the process running. Control expires after 60 seconds; `acquire` obtains unheld control and `takeover` explicitly fences an existing controller. `stop --block BLOCK_ID` uses your saved lease. `status --cursor CURSOR` pages the inventory; `status --block BLOCK_ID` reads one record.
 
-`serve` uses the user's config directory plus `continuum`, a random free loopback port, and private credential files. Use `--state /absolute/private/path` on every command to isolate a workspace. It runs in the foreground and installs no service. Ctrl-C shuts down the daemon and its managed processes. Process groups do not contain commands that deliberately escape into another OS session.
+`serve` uses the user's config directory plus `continuum`, serves the API on a private Unix socket in that directory (`v1.sock`), and opens a random free loopback port for the legacy Menagerie WebSocket only. Credential files are private. Use `--state /absolute/private/path` on every command to isolate a workspace. It runs in the foreground and installs no service. Ctrl-C shuts down the daemon and its managed processes. Process groups do not contain commands that deliberately escape into another OS session.
 
 Metadata and retained history survive restart; processes do not in this alpha. Recovered active records become `interrupted`. History from an unclean daemon epoch is conservatively marked incomplete, including exited blocks; the event API returns an `indeterminate` envelope with the retained events. Retention-expired cursors return `history_gap` and the available range. Fresh work after recovery has its own complete/incomplete record. A storage writer failure refuses further durable mutations. A fault in one ACP reader marks that block’s history incomplete without disabling unrelated controls.
 
-Content recording is enabled by default, bounded to 16 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also keeps at most 1024 recorded blocks, retiring the oldest exited or interrupted block (with its retained events) when a new one needs room; only a host with 1024 active blocks refuses an open. Duplicate-request reconciliation retains at most 4096 operation identities, retiring the oldest resolved ones first; a retry of a retired request executes again rather than replaying its saved result. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB. `events --text` shows printable text and colour only; clipboard, title, query and screen-mode sequences an agent's output may carry are dropped before they reach your terminal. `events --raw` replays the exact bytes and is for trusted output redirected to a file. JSON/NDJSON retains encoded payloads. Experimental interactive terminal attachment is available for the opt-in screen-v1 profile below.
+Content recording is enabled by default, bounded to 16 MiB/4096 retained events per host; the database's allocated file can be larger. This alpha also keeps at most 1024 recorded blocks, retiring the oldest exited or interrupted block (with its retained events) when a new one needs room; only a host with 1024 active blocks refuses an open. Duplicate-request reconciliation retains at most 4096 operation identities, retiring the oldest resolved ones first. Inside that window a repeated `--request-id` replays the saved result; once an identity has been retired the same request executes again as a fresh mutation and occupies the ledger anew — the documented cost of a bounded ledger. It has no purge/compaction UI yet. Captured output can contain sensitive text. Input accepts UTF-8 text up to 64 KiB. `events --text` shows printable text and colour only; clipboard, title, query and screen-mode sequences an agent's output may carry are dropped before they reach your terminal. `events --raw` replays the exact bytes and is for trusted output redirected to a file. JSON/NDJSON retains encoded payloads. Experimental interactive terminal attachment is available for the opt-in screen-v1 profile below.
 
 ### Experimental interactive terminals
 
@@ -85,7 +85,7 @@ The experimental engine is a bounded Go adapter around Charm's VT implementation
 
 ### Use with Menagerie
 
-Point Menagerie's manual Add relay form at `ws://` plus the address printed by `serve`. Use the operator credential in the private state directory's `operator.token`. For a local browser origin, start `serve --origin http://127.0.0.1:PORT`. Hosted Menagerie origins retain their existing allowlist. Never put this alpha on a public listener.
+Point Menagerie's manual Add relay form at the `ws://` address printed by `serve` (the legacy WebSocket; the CLI's own API is not on TCP). Use the operator credential in the private state directory's `operator.token`. For a local browser origin, start `serve --origin http://127.0.0.1:PORT`. Hosted Menagerie origins retain their existing allowlist. Never put this alpha on a public listener.
 
 Menagerie's existing browser still uses trusted legacy takeover behavior. A Continuum observer does not steal its token, but an explicit browser reattach fences modern control. A legacy browser may need reconnecting to discover sessions opened elsewhere. Browser folder storage and daemon history are separate; skipping browser storage does not disable daemon capture.
 

@@ -148,11 +148,25 @@ func TestLedgerWindowNeverBlocksStop(t *testing.T) {
 			t.Fatalf("renew %d: %+v", i, r)
 		}
 	}
-	if r := call("operator", api.Request{Operation: "stop", Block: id, Lease: lease, RequestID: "stop"}); r.Class != "ok" {
-		t.Fatalf("stop after the window filled: %+v", r)
-	}
 	if old, err := m.Store.Lookup("renew-0"); err != nil || old != nil {
 		t.Fatalf("oldest renew must have left the window: %v %v", old, err)
+	}
+	// Past the window, an identity is forgotten: the same request executes
+	// again as a fresh mutation rather than replaying a saved result. This is
+	// the documented cost of a bounded ledger, and it must be visible.
+	first := call("operator", api.Request{Operation: "renew", Block: id, Lease: lease, RequestID: "renew-0"})
+	if first.Class != "ok" {
+		t.Fatalf("an evicted identity must execute again: %+v", first)
+	}
+	if old, err := m.Store.Lookup("renew-0"); err != nil || old == nil || len(old.Result) == 0 {
+		t.Fatalf("the re-executed request must occupy the ledger anew: %v %v", old, err)
+	}
+	second := call("operator", api.Request{Operation: "renew", Block: id, Lease: lease, RequestID: "renew-0"})
+	if string(second.Result) != string(first.Result) {
+		t.Fatalf("inside the window the same identity replays: %s vs %s", first.Result, second.Result)
+	}
+	if r := call("operator", api.Request{Operation: "stop", Block: id, Lease: lease, RequestID: "stop"}); r.Class != "ok" {
+		t.Fatalf("stop after the window filled: %+v", r)
 	}
 	if r := call("operator", api.Request{Operation: "stop", Block: "0123456789abcdef", Lease: "x", RequestID: "ghost"}); r.Code != "not_running" {
 		t.Fatalf("stop on an unknown block: %+v", r)

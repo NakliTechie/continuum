@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/NakliTechie/continuum/api"
+	"github.com/NakliTechie/continuum/internal/ipc"
 	"github.com/NakliTechie/continuum/internal/terminal"
 	"github.com/charmbracelet/x/term"
 	creackpty "github.com/creack/pty"
@@ -52,7 +53,7 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 	frame := terminal.Snapshot{Engine: terminal.Name, Cols: 80, Rows: 23, Revision: 1, Cursor: terminal.Cursor{Visible: true, X: 5, Y: 1}, Lines: make([]string, 23), ANSI: make([]string, 23)}
 	frame.Lines[0] = "ATTACH_READY"
 	frame.ANSI[0] = "ATTACH_READY"
-	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var q api.Request
 		if json.NewDecoder(r.Body).Decode(&q) != nil {
 			t.Error("invalid API request")
@@ -119,9 +120,9 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 		}
 		json.NewEncoder(w).Encode(result)
 	}))
-	t.Cleanup(h.Close)
 	dir := t.TempDir()
-	for name, value := range map[string]string{"endpoint": strings.TrimPrefix(h.URL, "http://"), "operator.token": "op", "observer.token": "observer"} {
+	serveOnSocket(t, h, dir)
+	for name, value := range map[string]string{"operator.token": "op", "observer.token": "observer"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -335,4 +336,18 @@ func TestAttachRejectsPipesBeforeCallingDaemon(t *testing.T) {
 	if code := attach(t.TempDir(), attachBlock, false, false, strings.NewReader(""), &out, &diag); code != 2 || !strings.Contains(diag.String(), "requires a terminal") {
 		t.Fatal(code, diag.String())
 	}
+}
+
+// serveOnSocket starts an unstarted httptest server on the state directory's
+// API socket, which is the only place the CLI dials.
+func serveOnSocket(t *testing.T, h *httptest.Server, dir string) {
+	t.Helper()
+	ln, err := ipc.Listen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Listener.Close()
+	h.Listener = ln
+	h.Start()
+	t.Cleanup(h.Close)
 }

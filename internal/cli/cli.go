@@ -15,14 +15,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/NakliTechie/continuum/api"
 	"github.com/NakliTechie/continuum/internal/config"
+	"github.com/NakliTechie/continuum/internal/ipc"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/server"
 	"github.com/charmbracelet/x/ansi"
@@ -414,16 +415,8 @@ func render(v api.Response, machine bool, out, diag io.Writer) int {
 }
 func call(ctx context.Context, dir string, observer bool, q api.Request) api.Response {
 	fail := func(code, msg string) api.Response { return api.Error(q.RequestID, "unreachable", code, msg, "serve") }
-	endpoint, err := privateRead(filepath.Join(dir, "endpoint"))
-	if err != nil {
+	if ipc.Absent(dir) {
 		return fail("daemon_not_running", "start continuum serve with the same --state directory")
-	}
-	addr := strings.TrimSpace(string(endpoint))
-	host, port, err := net.SplitHostPort(addr)
-	ip := net.ParseIP(host)
-	p, pe := strconv.Atoi(port)
-	if err != nil || ip == nil || !ip.IsLoopback() || pe != nil || p < 1 || p > 65535 {
-		return fail("invalid_endpoint", "endpoint must name a loopback listener")
 	}
 	name := "operator.token"
 	if observer {
@@ -436,7 +429,8 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	b, _ := json.Marshal(q)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+addr+"/v1", bytes.NewReader(b))
+	// The host is a name for the Unix socket, not an address anything resolves.
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://continuum/v1", bytes.NewReader(b))
 	if err != nil {
 		return fail("request", "could not construct request")
 	}
@@ -450,12 +444,15 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	} else {
 		req.Header.Set("Idempotency-Key", journal.ID())
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := clientFor(dir).Do(req)
 	if err != nil {
+		if errors.Is(err, ipc.ErrForeignLink) {
+			return api.Error(q.RequestID, "access_denied", "socket_link", "the state socket is a symlink this daemon did not create; remove "+ipc.Path(dir)+" and start serve again", "serve")
+		}
 		if !readOperation(q.Operation) {
 			return api.Error(q.RequestID, "indeterminate", "transport_lost", "request may have executed; retry with the same --request-id to reconcile", "status")
 		}
-		return fail("daemon_unreachable", "daemon is unreachable; inspect or start it")
+		return fail("daemon_unreachable", "socket present but nothing answers; the daemon exited uncleanly, start continuum serve again")
 	}
 	defer resp.Body.Close()
 	var v api.Response
@@ -507,23 +504,29 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	cfg.ResolveAgents(nil)
 	srv := server.New(cfg)
 	modern := srv.EnableModern(store, observer)
-	mux := http.NewServeMux()
-	mux.Handle("/v1", modern)
-	mux.Handle("/", srv.Handler())
+	// Two doors, one registry: the modern API on a private Unix socket in the
+	// state directory; the legacy Menagerie WebSocket on a loopback TCP port,
+	// which is the only thing a browser can reach.
+	sock, err := ipc.Listen(dir)
+	if err != nil {
+		return err
+	}
+	defer sock.Close()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	endpoint := filepath.Join(dir, "endpoint")
-	if err := atomicWrite(endpoint, []byte(ln.Addr().String())); err != nil {
-		return err
+	timeouts := func(h http.Handler) *http.Server {
+		return &http.Server{Handler: h, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
-	defer os.Remove(endpoint)
-	h := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
-	done := make(chan error, 1)
-	go func() { done <- h.Serve(ln) }()
-	fmt.Fprintf(diag, "Continuum %s ready at %s\nState: %s\nNext: %s\nCtrl-C stops this daemon and its processes.\n", Version, ln.Addr(), dir, clientCommand("status", dir, ""))
+	apiMux := http.NewServeMux()
+	apiMux.Handle("/v1", modern)
+	apiServer, legacyServer := timeouts(apiMux), timeouts(srv.Handler())
+	done := make(chan error, 2)
+	go func() { done <- apiServer.Serve(sock) }()
+	go func() { done <- legacyServer.Serve(ln) }()
+	fmt.Fprintf(diag, "Continuum %s ready\nAPI socket: %s\nLegacy WebSocket (Menagerie): ws://%s\nState: %s\nNext: %s\nCtrl-C stops this daemon and its processes.\n", Version, ipc.Path(dir), ln.Addr(), dir, clientCommand("status", dir, ""))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	select {
@@ -534,7 +537,8 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	srv.BeginShutdown()
-	_ = h.Shutdown(shutdown)
+	_ = apiServer.Shutdown(shutdown)
+	_ = legacyServer.Shutdown(shutdown)
 	srv.StopAll()
 	if err := srv.Drain(shutdown); err != nil {
 		return err
@@ -542,13 +546,32 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	return modern.CleanShutdown()
 }
 
-// httpClient is shared by every call in this process so a follow or attach
-// loop reuses one loopback connection instead of opening one per poll. No
-// proxy, no redirects: the endpoint is a loopback address this process read
-// from its own private state directory.
-var httpClient = &http.Client{
-	Transport:     &http.Transport{Proxy: nil, MaxIdleConns: 2, IdleConnTimeout: 30 * time.Second},
-	CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") },
+// clientFor returns the process-wide client for a state directory's socket,
+// so a follow or attach loop reuses one connection instead of opening one per
+// poll. No proxy, no redirects, no TCP: the transport dials the private Unix
+// socket and nothing else.
+func clientFor(dir string) *http.Client {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	if c, ok := clients[dir]; ok {
+		return c
+	}
+	c := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           nil,
+			DialContext:     func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, dir) },
+			MaxIdleConns:    2,
+			IdleConnTimeout: 30 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") },
+	}
+	clients[dir] = c
+	return c
 }
+
+var (
+	clientsMu sync.Mutex
+	clients   = map[string]*http.Client{}
+)
 
 func readOperation(op string) bool { return op == "status" || op == "events" || op == "screen" }
