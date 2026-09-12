@@ -64,18 +64,26 @@ func serviceInstall(dir, addr, origin, adoptRelay string, out, diag io.Writer) i
 		return 2
 	}
 	// Materialise state and credentials before backgrounding, so the operator
-	// token exists to hand back and the first boot has nothing to create.
-	store, err := journal.Open(abs)
-	if err != nil {
+	// token exists to hand back and the first boot has nothing to create. Skip
+	// it when adopting a relay (the daemon writes the adopted token on its first
+	// serve) or when the state already exists — re-installing over a running
+	// service must not fight it for the state lock.
+	if adoptRelay == "" && !fileExists(filepath.Join(abs, "operator.token")) {
+		store, err := journal.Open(abs)
+		if err != nil {
+			fmt.Fprintln(diag, err)
+			return 5
+		}
+		_ = store.Close()
+		if _, err := credential(abs, "operator.token"); err != nil {
+			fmt.Fprintln(diag, "could not create operator credential")
+			return 5
+		}
+		_, _ = credential(abs, "observer.token")
+	} else if err := os.MkdirAll(abs, 0o700); err != nil {
 		fmt.Fprintln(diag, err)
 		return 5
 	}
-	_ = store.Close()
-	if _, err := credential(abs, "operator.token"); err != nil {
-		fmt.Fprintln(diag, "could not create operator credential")
-		return 5
-	}
-	_, _ = credential(abs, "observer.token")
 
 	bin, err := selfPath()
 	if err != nil {
@@ -130,7 +138,7 @@ func installLaunchd(bin string, argv []string, logPath string, out, diag io.Writ
 		return 5
 	}
 	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	plist := launchdPlist(bin, argv, logPath)
+	plist := launchdPlist(bin, argv, logPath, servicePath())
 	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
 		fmt.Fprintln(diag, err)
 		return 5
@@ -161,7 +169,7 @@ func installSystemd(bin string, argv []string, out, diag io.Writer) int {
 		return 5
 	}
 	unitPath := filepath.Join(unitDir, systemdUnit)
-	unit := systemdUnitFile(bin, argv)
+	unit := systemdUnitFile(bin, argv, servicePath())
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		fmt.Fprintln(diag, err)
 		return 5
@@ -260,7 +268,7 @@ func systemdQuoted(s string) string {
 
 // launchdPlist renders the agent plist. Every argument is XML-escaped so a path
 // containing &, <, > or quotes cannot malform the document or inject keys.
-func launchdPlist(bin string, argv []string, logPath string) string {
+func launchdPlist(bin string, argv []string, logPath, path string) string {
 	var progArgs strings.Builder
 	for _, a := range append([]string{bin}, argv...) {
 		progArgs.WriteString("    <string>" + xmlEscape(a) + "</string>\n")
@@ -278,15 +286,17 @@ func launchdPlist(bin string, argv []string, logPath string) string {
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>%s</string></dict>
 </dict>
 </plist>
-`, launchdLabel, progArgs.String(), xmlEscape(logPath), xmlEscape(logPath))
+`, launchdLabel, progArgs.String(), xmlEscape(logPath), xmlEscape(logPath), xmlEscape(path))
 }
 
 // systemdUnitFile renders the --user unit. Every argument is systemd-quoted so
 // a path with %, $, backslash or quotes is neither expanded nor able to break
 // out of ExecStart.
-func systemdUnitFile(bin string, argv []string) string {
+func systemdUnitFile(bin string, argv []string, path string) string {
 	execStart := `"` + systemdQuoted(bin) + `"`
 	for _, a := range argv {
 		execStart += ` "` + systemdQuoted(a) + `"`
@@ -297,6 +307,7 @@ After=network.target
 
 [Service]
 ExecStart=%s
+Environment="PATH=%s"
 Restart=always
 RestartSec=2
 # The daemon's holder subprocesses keep PTY blocks alive across a restart; they
@@ -305,7 +316,7 @@ KillMode=process
 
 [Install]
 WantedBy=default.target
-`, execStart)
+`, execStart, systemdQuoted(path))
 }
 
 // portNum parses a decimal port, returning 0 for anything not a positive
@@ -431,3 +442,28 @@ func defaultRelayPath() (string, error) {
 	}
 	return p, nil
 }
+
+// servicePath returns the PATH baked into the service unit: the install-time
+// PATH (so an agent command like `claude` resolves as it does in the operator's
+// shell) with common tool directories appended as a floor for a sparse
+// login/launchd environment.
+func servicePath() string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(list string) {
+		for _, d := range strings.Split(list, ":") {
+			if d = strings.TrimSpace(d); d != "" && !strings.ContainsAny(d, "\n\r") && !seen[d] {
+				seen[d] = true
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	add(os.Getenv("PATH"))
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".local", "bin"))
+	}
+	add("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	return strings.Join(dirs, ":")
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }

@@ -10,7 +10,7 @@ import (
 
 func TestLaunchdPlistEscapesAndCarriesArgs(t *testing.T) {
 	argv := []string{"serve", "--state", "/home/a&b/<state>", "--listen", "127.0.0.1:58750"}
-	plist := launchdPlist("/opt/con\"tinuum", argv, "/home/a&b/serve.log")
+	plist := launchdPlist("/opt/con\"tinuum", argv, "/home/a&b/serve.log", "/opt/homebrew/bin:/usr/bin")
 	for _, want := range []string{
 		"<string>com.naklitechie.continuum</string>",
 		"<string>/opt/con&quot;tinuum</string>",
@@ -26,11 +26,24 @@ func TestLaunchdPlistEscapesAndCarriesArgs(t *testing.T) {
 	if strings.Contains(plist, "<state>") || strings.Contains(plist, "a&b") {
 		t.Fatal("unescaped metacharacter reached the plist")
 	}
+	if !strings.Contains(plist, "<key>EnvironmentVariables</key>") || !strings.Contains(plist, "/opt/homebrew/bin") {
+		t.Fatalf("plist missing a PATH environment so agents like `claude` would not resolve:\n%s", plist)
+	}
+}
+
+func TestServicePathIncludesInstallTimeAndCommonDirs(t *testing.T) {
+	t.Setenv("PATH", "/custom/tool/bin:/usr/bin")
+	p := servicePath()
+	for _, want := range []string{"/custom/tool/bin", "/usr/bin", "/opt/homebrew/bin", "/bin"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("servicePath missing %q: %s", want, p)
+		}
+	}
 }
 
 func TestSystemdUnitQuotesArgs(t *testing.T) {
 	argv := []string{"serve", "--state", "/srv/pct$HOME/%weird", "--listen", "127.0.0.1:58750"}
-	unit := systemdUnitFile("/usr/bin/continuum", argv)
+	unit := systemdUnitFile("/usr/bin/continuum", argv, "/usr/bin:/bin")
 	if !strings.Contains(unit, `ExecStart="/usr/bin/continuum" "serve" "--state" "/srv/pct$$HOME/%%weird" "--listen" "127.0.0.1:58750"`) {
 		t.Fatalf("systemd ExecStart not quoted as expected:\n%s", unit)
 	}
