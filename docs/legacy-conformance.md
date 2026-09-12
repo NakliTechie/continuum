@@ -27,7 +27,7 @@ Frame waits have one overall deadline and a frame-count cap; unrelated output ca
 
 ## Boundaries
 
-This suite covers loopback macOS/Linux execution with tmux off and a fake ACP process. It does not validate browser rendering, real provider behavior, full history recovery, operating-system login, multiple read-only viewers, WAN resilience, or the future adapter against every legacy frame. Add those cases as the corresponding slice arrives; this is not a complete migration gate.
+This suite covers loopback macOS/Linux execution with a fake ACP process; tmux is off except for the restart case, which runs a private tmux server. It does not validate browser rendering, real provider behavior, full history recovery, operating-system login, multiple read-only viewers, WAN resilience, or the future adapter against every legacy frame. Add those cases as the corresponding slice arrives; this is not a complete migration gate.
 
 The future runtime can be supplied through explicit executable paths; the documented baseline runner establishes the current reference. Never point the suite at a live daemon: it always launches its own child from the supplied executable.
 

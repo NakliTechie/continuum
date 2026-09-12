@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -447,11 +448,11 @@ func TestRestartWithTmuxAdoptsTheRunningAgent(t *testing.T) {
 				return false
 			}
 			b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
-			for _, line := range strings.Split(string(b), "\n") {
-				if i := strings.Index(line, ":"+marker); i > 0 {
-					pid = strings.TrimSpace(line[:i])
-					return true
-				}
+			// tmux redraws around the echo; only the digits immediately before
+			// ":marker" are the PID.
+			if m := regexp.MustCompile(`(\d+):` + regexp.QuoteMeta(marker)).FindSubmatch(b); m != nil {
+				pid = string(m[1])
+				return true
 			}
 			return false
 		})
