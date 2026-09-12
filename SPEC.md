@@ -112,7 +112,7 @@ State guarantees must be advertised and tested separately:
 |---|---|
 | Client closes or sleeps | Processes continue; recording and persisted waits continue independently. |
 | Network disconnects | Reauthenticate, reauthorize, resume at cursor; distinguish replay from new events. |
-| Runtime restarts | Metadata/history recover. PTYs can survive through tmux initially; ACP recovery uses its agent's supported conversation-load mechanism. Interrupted work is reported honestly. |
+| Runtime restarts | Metadata/history recover. PTYs survive through a per-block holder process (tmux remains the legacy relay's mechanism); ACP recovery uses its agent's supported conversation-load mechanism. Interrupted work is reported honestly. |
 | Host reboots | Records recover; a killed process does not magically resume. Only explicit restart policy can launch a replacement with a new execution epoch. |
 | Disk full or journal failure | Mark capture degraded and expose a structured failure. Refuse new durable operations if their persistence guarantee cannot be met. Never acknowledge durable commit before it exists. |
 

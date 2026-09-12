@@ -20,7 +20,7 @@ func TestListenIsPrivateAndDialable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	target, err := resolve(Path(dir))
+	target, err := Resolve(Path(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestListenClearsStaleAndRefusesLive(t *testing.T) {
 	// Simulate a crash: the listening socket goes away without unlinking.
 	first.Listener.(*net.UnixListener).SetUnlinkOnClose(false)
 	first.Listener.Close()
-	if stale, _ := resolve(Path(dir)); stale == "" {
+	if stale, _ := Resolve(Path(dir)); stale == "" {
 		t.Fatal("resolve failed on our own socket")
 	} else if _, err := os.Lstat(stale); err != nil {
 		t.Fatalf("stale socket should still be on disk: %v", err)
@@ -89,7 +89,7 @@ func TestLongStatePathUsesAnAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target, err := resolve(Path(dir)); err != nil || ln.alias == "" || len(target) > maxPath {
+	if target, err := Resolve(Path(dir)); err != nil || ln.alias == "" || len(target) > maxPath {
 		t.Fatalf("expected a short alias, got %q %v", target, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

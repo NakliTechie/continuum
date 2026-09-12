@@ -299,7 +299,7 @@ func TestCheckerWSOverflowIncompleteIsPerBlock(t *testing.T) {
 	t.Logf("64 permissions delivered; child %d reaped; victim incomplete; unrelated history intact", victim.PID)
 }
 func TestCheckerViewerByteFrameBoundsPumpAndMarker(t *testing.T) {
-	if outboxCapacity != 384 || outboxByteCapacity != 16<<20 || tailCapacity != 256 || tailByteCapacity != 16<<20 {
+	if outboxCapacity != 2304 || outboxByteCapacity != 16<<20 || tailCapacity != 2048 || tailByteCapacity != 16<<20 {
 		t.Fatal("contract constants changed")
 	}
 	s := New(&config.Config{})
@@ -348,7 +348,7 @@ func TestCheckerViewerByteFrameBoundsPumpAndMarker(t *testing.T) {
 		t.Fatal("send after close")
 	}
 	e = &sessionEntry{outbox: make(chan []byte, outboxCapacity)}
-	for i := 0; i < 384; i++ {
+	for i := 0; i < outboxCapacity; i++ {
 		if sent, _ := e.trySend([]byte("x")); !sent {
 			t.Fatal("under count rejected")
 		}
@@ -356,7 +356,7 @@ func TestCheckerViewerByteFrameBoundsPumpAndMarker(t *testing.T) {
 	if sent, _ := e.trySend([]byte("x")); sent {
 		t.Fatal("over count accepted")
 	}
-	if e.outBytes != 384 {
+	if e.outBytes != outboxCapacity {
 		t.Fatal(e.outBytes)
 	}
 	e = &sessionEntry{}
@@ -373,10 +373,10 @@ func TestCheckerViewerByteFrameBoundsPumpAndMarker(t *testing.T) {
 	if e.tail[0][0] == 255 {
 		t.Fatal("snapshot aliases tail")
 	}
-	for i := 0; i < 300; i++ {
+	for i := 0; i < tailCapacity+44; i++ {
 		e.appendTail([]byte{byte(i)})
 	}
-	if len(e.tail) != 256 || e.tailBytes != 256 {
+	if len(e.tail) != tailCapacity || e.tailBytes != tailCapacity {
 		t.Fatalf("tail count accounting %d %d", len(e.tail), e.tailBytes)
 	}
 	e.appendTail(make([]byte, (16<<20)+1))
@@ -411,7 +411,7 @@ func TestCheckerConcurrentViewerAccounting(t *testing.T) {
 	for _, b := range e.tail {
 		total += len(b)
 	}
-	if e.outBytes != 0 || e.tailBytes != total || len(e.tail) > 256 || total > 16<<20 {
+	if e.outBytes != 0 || e.tailBytes != total || len(e.tail) > tailCapacity || total > 16<<20 {
 		t.Fatalf("accounting out=%d tail=%d actual=%d count=%d", e.outBytes, e.tailBytes, total, len(e.tail))
 	}
 }

@@ -38,11 +38,19 @@ type Listener struct {
 	alias string // a short private directory when the state path is too long
 }
 
+// Alias is the short private directory the socket was bound in, or "" when
+// the state path itself was short enough.
+func (l *Listener) Alias() string { return l.alias }
+
 // Listen binds the state directory's API socket. A socket left behind by a
 // crashed daemon is removed when nothing answers on it; a live daemon is
 // refused. The socket file is private to the user.
-func Listen(dir string) (*Listener, error) {
-	path := Path(dir)
+func Listen(dir string) (*Listener, error) { return ListenPath(Path(dir)) }
+
+// ListenPath binds a private socket at path, with the same stale-clearing,
+// live-refusal and long-path aliasing as the API socket. Block holders use it
+// for their per-block sockets beside the API socket.
+func ListenPath(path string) (*Listener, error) {
 	if err := clearStale(path); err != nil {
 		return nil, err
 	}
@@ -50,11 +58,11 @@ func Listen(dir string) (*Listener, error) {
 	if len(path) > maxPath {
 		// Bind at a short private path and leave a symlink where clients look;
 		// connect follows the link. The alias directory is 0700.
-		d, err := shortTempDir()
+		d, err := shortTempDir(filepath.Base(path))
 		if err != nil {
 			return nil, err
 		}
-		alias, target = d, filepath.Join(d, SocketName)
+		alias, target = d, filepath.Join(d, filepath.Base(path))
 		if err := os.Symlink(target, path); err != nil {
 			os.RemoveAll(d)
 			return nil, err
@@ -96,17 +104,27 @@ var ErrForeignLink = errors.New("state socket path is a symlink this daemon did 
 // fit sockaddr_un as written, so when the daemon left a symlink to a short
 // alias, the alias is what gets dialed.
 func Dial(ctx context.Context, dir string) (net.Conn, error) {
-	target, err := resolve(Path(dir))
+	target, err := Resolve(Path(dir))
 	if err != nil {
 		return nil, err
 	}
 	return (&net.Dialer{}).DialContext(ctx, "unix", target)
 }
 
-// resolve follows only the symlink shape this package creates: a link to
-// `<alias>/v1.sock` inside a `continuum-ipc-*` directory directly under a temp
-// root. Any other link is refused rather than followed.
-func resolve(path string) (string, error) {
+// IsAlias reports whether path is a symlink of the shape this package creates.
+func IsAlias(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	target, err := os.Readlink(path)
+	return err == nil && isAlias(target)
+}
+
+// Resolve follows only the symlink shape this package creates: a link to
+// `<alias>/<name>.sock` inside a `continuum-ipc-*` directory directly under a
+// temp root. Any other link is refused rather than followed.
+func Resolve(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return path, nil
@@ -120,7 +138,7 @@ func resolve(path string) (string, error) {
 
 // isAlias reports whether target is a socket path this package would create.
 func isAlias(target string) bool {
-	if filepath.Base(target) != SocketName || !filepath.IsAbs(target) {
+	if !strings.HasSuffix(filepath.Base(target), ".sock") || !filepath.IsAbs(target) {
 		return false
 	}
 	dir := filepath.Dir(target)
@@ -150,7 +168,7 @@ func clearStale(path string) error {
 	if info.Mode()&os.ModeSymlink == 0 && info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("%s exists and is not a socket", path)
 	}
-	target, err := resolve(path)
+	target, err := Resolve(path)
 	if err != nil {
 		// A foreign link is never followed, not even to ask whether a daemon
 		// answers; it is replaced and its target left alone.
@@ -171,10 +189,10 @@ func clearStale(path string) error {
 
 // shortTempDir makes a private directory whose path is short enough for a
 // socket even when TMPDIR itself is long (test harnesses redirect it deep).
-func shortTempDir() (string, error) {
+func shortTempDir(name string) (string, error) {
 	for _, base := range []string{"/tmp", os.TempDir()} {
 		if d, err := os.MkdirTemp(base, "continuum-ipc-"); err == nil {
-			if len(filepath.Join(d, SocketName)) <= maxPath {
+			if len(filepath.Join(d, name)) <= maxPath {
 				return d, nil
 			}
 			os.RemoveAll(d)
