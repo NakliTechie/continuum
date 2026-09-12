@@ -19,6 +19,7 @@ The baseline runner uses the existing local Menagerie Git object database, extra
 | Attention | Another inventory read preserves done; explicit seen moves done to idle. |
 | Approval guard | While the fake ACP agent asks permission, a task prompt is refused with session_blocked; explicit permission response completes the turn. |
 | Subtree kill | Parent and child both exit after an authorized subtree stop. |
+| Restart with tmux | With `tmux = "on"` the agent outlives the relay process: after the relay is killed and restarted, the inventory lists the session, a client attaches with a fresh token, and input drives the same process. This is the restart/tmux cell of the compatibility matrix; it runs against the pinned baseline and the candidate. |
 
 Legacy PTY input is raw UTF-8 in `input.data`; output is base64 in `output.data`. Preserve this directional asymmetry.
 

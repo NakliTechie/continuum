@@ -26,9 +26,19 @@ type frame = map[string]any
 
 type harness struct {
 	url, token, home string
+	relay, addr      string
+	env              []string
+	tmux             bool
+	cmd              *exec.Cmd
+	exited           chan error
 }
 
-func startRelay(t *testing.T) *harness {
+func startRelay(t *testing.T) *harness { return startRelayWith(t, false) }
+
+// startRelayWith launches a disposable relay; with tmux the relay wraps each
+// PTY agent in a private tmux server (TMUX_TMPDIR under the disposable home)
+// so the agent can outlive the relay process itself.
+func startRelayWith(t *testing.T, withTmux bool) *harness {
 	t.Helper()
 	relay, fake := os.Getenv("CONTINUUM_TEST_RELAY"), os.Getenv("CONTINUUM_TEST_ACP")
 	if !filepath.IsAbs(relay) || !filepath.IsAbs(fake) {
@@ -59,20 +69,53 @@ func startRelay(t *testing.T) *harness {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	config := fmt.Sprintf("name = %q\nlisten = %q\nregistration_token = %q\ntmux = \"off\"\nadopt_foreign_tmux = false\nallow_localhost_origins = false\nallowed_origins = [\"https://continuum.test\"]\n[agents.custom]\n[agents.fake]\ncommand = %q\ntransports = [\"acp\"]\n", "continuum-test", addr, h.token, fake)
+	tmuxMode, path := "off", "/usr/bin:/bin"
+	if withTmux {
+		tmuxBin, err := exec.LookPath("tmux")
+		if err != nil {
+			t.Skip("tmux not installed")
+		}
+		tmuxMode, path = "on", filepath.Dir(tmuxBin)+":"+path
+	}
+	config := fmt.Sprintf("name = %q\nlisten = %q\nregistration_token = %q\ntmux = %q\nadopt_foreign_tmux = false\nallow_localhost_origins = false\nallowed_origins = [\"https://continuum.test\"]\n[agents.custom]\n[agents.fake]\ncommand = %q\ntransports = [\"acp\"]\n", "continuum-test", addr, h.token, tmuxMode, fake)
 	if err := os.WriteFile(filepath.Join(dir, "relay.toml"), []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := os.Create(filepath.Join(home, "relay.log"))
+	// HOME is only the disposable child process's actual home. The parent
+	// environment and user's configuration are never modified or inherited.
+	// A private TMUX_TMPDIR keeps any tmux server away from the user's.
+	h.relay, h.addr, h.tmux = relay, addr, withTmux
+	h.env = []string{"HOME=" + home, "PATH=" + path, "TMPDIR=" + home, "TERM=xterm-256color"}
+	if withTmux {
+		// Unix socket paths are short; the disposable home is not.
+		sock, err := os.MkdirTemp("/tmp", "ct-tmux-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.env = append(h.env, "TMUX_TMPDIR="+sock)
+		t.Cleanup(func() {
+			kill := exec.Command("tmux", "kill-server")
+			kill.Env = h.env
+			_ = kill.Run()
+			os.RemoveAll(sock)
+		})
+	}
+	h.launch(t)
+	return h
+}
+
+// launch starts (or restarts) the relay process on the harness's fixed
+// address and waits for it to answer.
+func (h *harness) launch(t *testing.T) {
+	t.Helper()
+	logs, err := os.OpenFile(filepath.Join(h.home, "relay.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = logs.Close() })
-	cmd := exec.Command(relay, "serve")
-	cmd.Dir = home
-	// HOME is only the disposable child process's actual home. The parent
-	// environment and user's configuration are never modified or inherited.
-	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "TMPDIR=" + home, "TERM=xterm-256color"}
+	cmd := exec.Command(h.relay, "serve")
+	cmd.Dir = h.home
+	cmd.Env = h.env
 	cmd.Stdout, cmd.Stderr = logs, logs
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -80,6 +123,7 @@ func startRelay(t *testing.T) *harness {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
+	h.cmd, h.exited = cmd, exited
 	t.Cleanup(func() {
 		// ACP helpers inherit this test's group. PTY descriptors close with
 		// the relay, delivering hangup to the disposable terminal process.
@@ -97,12 +141,24 @@ func startRelay(t *testing.T) *harness {
 		cancel()
 		if err == nil {
 			_ = c.CloseNow()
-			return h
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("disposable relay did not become reachable on its allocated loopback port")
-	return nil
+}
+
+// crash kills the relay process alone — not its process group — the way a
+// crash or an unplanned upgrade would, then waits for it to be gone.
+func (h *harness) crash(t *testing.T) {
+	t.Helper()
+	_ = h.cmd.Process.Kill()
+	select {
+	case err := <-h.exited:
+		h.exited <- err // the launch-time cleanup still expects to observe the exit
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay did not die")
+	}
 }
 
 func (h *harness) connect(t *testing.T, register bool) *websocket.Conn {
@@ -148,7 +204,7 @@ func until(t *testing.T, c *websocket.Conn, accept func(frame) bool) frame {
 			return f
 		}
 		if f["type"] == "error" {
-			t.Fatalf("unexpected relay error code: %v", f["code"])
+			t.Fatalf("unexpected relay error code: %v (%v)", f["code"], f["message"])
 		}
 	}
 	t.Fatal("frame limit reached before expected result")
@@ -369,4 +425,47 @@ func TestPTYOutputWhileDisconnected(t *testing.T) {
 		t.Fatal("reattach did not recover output produced while disconnected")
 	}
 	stop(t, d, id, text(t, attached, "session_token"))
+}
+
+// The restart/tmux cell of the compatibility matrix: an agent wrapped in tmux
+// survives the relay's own death; the restarted relay adopts it, a client sees
+// it in the inventory, attaches, and drives the same process.
+func TestRestartWithTmuxAdoptsTheRunningAgent(t *testing.T) {
+	h := startRelayWith(t, true)
+	c := h.connect(t, true)
+	id, token := h.spawn(t, c, "pty", nil, "")
+	send(t, c, frame{"type": "input", "session_id": id, "session_token": token, "data": "before-restart\n"})
+	until(t, c, func(f frame) bool {
+		if f["type"] != "output" {
+			return false
+		}
+		b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
+		return strings.Contains(string(b), "before-restart")
+	})
+	_ = c.CloseNow()
+	h.crash(t)
+	h.launch(t)
+	d := h.connect(t, true)
+	inventory := until(t, d, func(f frame) bool { return f["type"] == "sessions" })
+	found := false
+	for _, s := range inventory["sessions"].([]any) {
+		if s.(map[string]any)["session_id"] == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("restarted relay did not adopt the tmux-hosted session %s: %v", id, inventory["sessions"])
+	}
+	send(t, d, frame{"type": "attach", "session_id": id})
+	attached := until(t, d, func(f frame) bool { return f["type"] == "attached" })
+	fresh := text(t, attached, "session_token")
+	send(t, d, frame{"type": "input", "session_id": id, "session_token": fresh, "data": "after-restart\n"})
+	until(t, d, func(f frame) bool {
+		if f["type"] != "output" || f["seq"] == float64(-1) {
+			return false
+		}
+		b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
+		return strings.Contains(string(b), "after-restart")
+	})
+	stop(t, d, id, fresh)
 }

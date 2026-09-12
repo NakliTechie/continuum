@@ -40,7 +40,7 @@ The branch imports the runtime with history and attribution preserved; installed
 
 The development build is `0.1.0-alpha.2-dev`. The overnight branch extends the local alpha with opt-in server-owned terminal screens and interactive CLI attachment. The Go runtime was imported with Menagerie's subtree history preserved. Both adapters use the same session registry. No installed relay or service has been migrated.
 
-The automated gate covers the core with Go's race detector, a real CLI journey and six legacy black-box compatibility cases. A Chrome walk connected the unchanged Menagerie app to the new daemon, spawned `/bin/cat`, and replayed its browser-entered output from the CLI. Linux binaries are cross-build targets; native Linux execution and real model-provider sessions need separate validation.
+The automated gate covers the core with Go's race detector, a real CLI journey and seven legacy black-box compatibility cases. A Chrome walk connected the unchanged Menagerie app to the new daemon, spawned `/bin/cat`, and replayed its browser-entered output from the CLI. Linux binaries are cross-build targets; native Linux execution and real model-provider sessions need separate validation.
 
 ### Build and try
 
