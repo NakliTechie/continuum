@@ -48,6 +48,7 @@ Commands:
   open -- COMMAND ARGS     launch a PTY; arguments are preserved exactly; --cwd DIR sets its directory
   attach --block ID        interactive screen-v1 terminal; Ctrl-] detaches
   screen --block ID        inspect a current/final screen without taking control; --json for frames
+  contract                 print the /v1 contract version and capabilities (--json for the full record)
   events --block ID        replay bounded recorded events; --follow keeps watching
   export --block ID        write the block's output as an asciicast v3 recording to stdout
   acquire --block ID       acquire 60-second input control and save it privately
@@ -217,7 +218,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return 0
 	}
 	switch command {
-	case "status", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
+	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
 	default:
 		fmt.Fprintln(diag, "unknown command; run continuum help")
 		return 2
@@ -274,7 +275,11 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		}
 		return attach(*state, *block, *observer, *take, in, out, diag)
 	}
-	q := api.Request{Terminal: *profile, Cursor: *cursor, Operation: command, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
+	operation := command
+	if command == "contract" {
+		operation = "version" // /v1 op name; `continuum version` stays the local build-version print
+	}
+	q := api.Request{Terminal: *profile, Cursor: *cursor, Operation: operation, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
 	mut := !readOperation(command)
 	if mut && q.RequestID == "" {
 		q.RequestID = journal.ID()
@@ -340,6 +345,27 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		}
 		if v.Class == "ok" && command == "release" {
 			_ = os.Remove(leasePath)
+		}
+		if command == "contract" && v.Class == "ok" && !*machine {
+			var c struct {
+				Contract        string `json:"contract"`
+				ContractVersion string `json:"contract_version"`
+				SchemaVersion   int    `json:"schema_version"`
+				Server          string `json:"server"`
+				Restart         bool   `json:"process_restart_survival"`
+				Capabilities    struct {
+					Stable       []string `json:"stable"`
+					Experimental []string `json:"experimental"`
+				} `json:"capabilities"`
+			}
+			if err := json.Unmarshal(v.Result, &c); err != nil {
+				return render(api.Error(q.RequestID, "indeterminate", "invalid_contract", "invalid version response", "status"), false, out, diag)
+			}
+			fmt.Fprintf(out, "%s contract %s · schema %d · server %s\n", c.Contract, c.ContractVersion, c.SchemaVersion, c.Server)
+			fmt.Fprintf(out, "stable:       %s\n", strings.Join(c.Capabilities.Stable, ", "))
+			fmt.Fprintf(out, "experimental: %s\n", strings.Join(c.Capabilities.Experimental, ", "))
+			fmt.Fprintf(out, "process restart survival: %s\n", yesno(c.Restart))
+			return 0
 		}
 		if command == "screen" && v.Class == "ok" && !*machine {
 			frame, err := decodeScreen(v, *block)
@@ -519,6 +545,7 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	cfg.Tmux = "off"
 	cfg.AdoptForeignTmux = false
 	cfg.HoldersState = dir
+	cfg.ServerVersion = Version
 	disabled := ""
 	cfg.CaptureDir = &disabled
 	cfg.Listen = addr
@@ -602,8 +629,14 @@ var (
 	clients   = map[string]*http.Client{}
 )
 
+func yesno(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
 func readOperation(op string) bool {
-	return op == "status" || op == "events" || op == "screen" || op == "export"
+	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export"
 }
 
 // exportCast pages a block's journal and writes an asciicast v3 stream. It is a

@@ -114,6 +114,8 @@ type Config struct {
 	// captures nothing (server.New disables it), so tests and embedders never
 	// write into the installed relay's directory by omission.
 	CaptureDir *string `toml:"-"`
+	// ServerVersion is the build version the daemon reports over /v1 version.
+	ServerVersion string `toml:"-"`
 	// HoldersState, when set to the daemon's state directory, runs every PTY
 	// block under a holder process that outlives the daemon (see internal/holder).
 	// Empty keeps the legacy in-process child. Programmatic only.

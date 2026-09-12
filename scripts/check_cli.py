@@ -57,8 +57,13 @@ def main():
             assert b'First use' in help_text
             assert rpc('status', code=5)['code'] == 'daemon_not_running'
             daemon = start()
+            contract = rpc('contract')['result']
+            assert contract['contract'] == 'continuum/v1' and contract['contract_version'] == '1.0' and contract['schema_version'] == 1, contract
+            assert 'pty' in contract['capabilities']['stable'] and 'terminal_screen_v1' in contract['capabilities']['experimental'], contract
+            assert contract['process_restart_survival'] is True, contract
             initial = rpc('status')['result']
             assert initial['total'] == 0
+            assert initial['contract_version'] == '1.0', initial
             second = subprocess.run([str(binary), 'serve', '--state', str(state)], env=env,
                                     capture_output=True, timeout=3)
             assert second.returncode != 0

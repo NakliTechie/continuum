@@ -24,6 +24,28 @@ import (
 	"github.com/NakliTechie/continuum/internal/protocol"
 )
 
+// ContractVersion is the /v1 contract's stability version. Within a major, the
+// stable operation set and stable capabilities keep their meaning and only grow
+// additively; a breaking change bumps this major AND the socket name (v1.sock →
+// v2.sock), so an older client meets no socket rather than a changed contract.
+const ContractVersion = "1.0"
+
+// Capability tiers advertised by the version and status operations. Stable
+// capabilities will not change meaning within contract major 1; experimental
+// ones may change or be withdrawn. Changing either set is a deliberate act —
+// a pinned test guards it.
+var (
+	stableCapabilities       = []string{"pty", "observers", "control_lease", "event_replay", "control_renewal", "legacy_1.3"}
+	experimentalCapabilities = []string{"terminal_screen_v1", "terminal_input_base64"}
+	// stableOperations is the frozen /v1 operation vocabulary. version/status/
+	// events/screen are reads; the rest mutate through the request-id ledger.
+	stableOperations = []string{"version", "status", "events", "screen", "open", "acquire", "renew", "release", "takeover", "input", "resize", "stop"}
+)
+
+func allCapabilities() []string {
+	return append(append([]string{}, stableCapabilities...), experimentalCapabilities...)
+}
+
 type lease struct {
 	Token   string
 	Expires time.Time
@@ -143,7 +165,7 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error("", "invalid_request", "field_size", "identifier exceeds 128 bytes", "help"))
 		return
 	}
-	read := q.Operation == "status" || q.Operation == "events" || q.Operation == "screen"
+	read := q.Operation == "version" || q.Operation == "status" || q.Operation == "events" || q.Operation == "screen"
 	if !read && !operator {
 		w.WriteHeader(403)
 		reply(api.Error(q.RequestID, "access_denied", "operator_required", "observer credentials cannot change sessions", "status"))
@@ -167,6 +189,17 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func (m *Modern) read(q api.Request) api.Response {
 	switch q.Operation {
+	case "version":
+		return api.Result(q.RequestID, map[string]any{
+			"contract":                 "continuum/v1",
+			"contract_version":         ContractVersion,
+			"schema_version":           1,
+			"protocol":                 "continuum.local-alpha.1",
+			"server":                   m.s.cfg.ServerVersion,
+			"operations":               stableOperations,
+			"capabilities":             map[string]any{"stable": stableCapabilities, "experimental": experimentalCapabilities},
+			"process_restart_survival": m.s.cfg.HoldersState != "",
+		})
 	case "screen":
 		return m.screen(q)
 	case "status":
@@ -199,7 +232,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			next = b.ID
 		}
 		blocks = page
-		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": []string{"pty", "observers", "control_lease", "event_replay", "legacy_1.3", "terminal_screen_v1", "terminal_input_base64", "control_renewal"}, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": m.s.cfg.HoldersState != ""})
+		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": allCapabilities(), "contract_version": ContractVersion, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": m.s.cfg.HoldersState != ""})
 		return v
 	case "events":
 		p, err := m.Store.Read(q.After, q.Block)
