@@ -59,7 +59,7 @@ Commands:
   resize --block ID --cols N --rows N
   stop --block ID          stop work using your saved lease
   version                  show build version
-  service SUB              install/uninstall/status the always-on Continuum daemon (launchd/systemd)
+  service SUB              install/cutover/uninstall/status the always-on Continuum daemon (launchd/systemd)
   legacy SUBCOMMAND        Menagerie relay commands (serve, agents, token, service, materialise)
 
 Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
@@ -80,6 +80,13 @@ No service is installed. Remote listeners and untrusted multi-user hosting are u
 // splitHostPortLoose splits an address without failing on a missing port.
 func splitHostPortLoose(addr string) (host, port string, err error) {
 	return net.SplitHostPort(addr)
+}
+
+// set_listen_given reports whether addr is a concrete fixed port rather than the
+// serve default (:0). Used so an adopted relay's port wins when none was passed.
+func set_listen_given(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	return err == nil && port != "" && port != "0"
 }
 func defaultState() string {
 	d, err := os.UserConfigDir()
@@ -173,6 +180,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	listen := f.String("listen", "127.0.0.1:0", "loopback address")
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
 	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
+	adoptRelay := f.String("adopt-relay", "", "serve/service: adopt a menagerie-relay config (token, port, origins, agents)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
 	format := f.String("format", "asciicast", "export format: asciicast (v3)")
 	f.Usage = func() {} // parse errors get one line below; -h prints the full help
@@ -203,6 +211,10 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		fmt.Fprintln(diag, "--listen and --origin are for serve and service")
 		return 2
 	}
+	if set["adopt-relay"] && command != "serve" && command != "service" {
+		fmt.Fprintln(diag, "--adopt-relay is for serve and service")
+		return 2
+	}
 	if (set["cols"] || set["rows"]) && command != "resize" && command != "open" {
 		fmt.Fprintln(diag, "--cols and --rows are for resize and open --terminal screen-v1")
 		return 2
@@ -216,7 +228,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprintln(diag, "serve accepts flags only")
 			return 2
 		}
-		if err := serve(*state, *listen, *origin, diag); err != nil {
+		if err := serve(*state, *listen, *origin, *adoptRelay, diag); err != nil {
 			fmt.Fprintln(diag, err)
 			return 5
 		}
@@ -235,7 +247,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 				return 2
 			}
 		}
-		return service(*state, *listen, *origin, []string{sub}, out, diag)
+		return service(*state, *listen, *origin, *adoptRelay, []string{sub}, out, diag)
 	}
 	switch command {
 	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
@@ -538,7 +550,23 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	}
 	return v
 }
-func serve(dir, addr, origin string, diag io.Writer) error {
+func serve(dir, addr, origin, adoptRelay string, diag io.Writer) error {
+	var relay *config.Config
+	var relayToken string
+	if adoptRelay != "" {
+		var err error
+		if relay, err = config.Load(adoptRelay); err != nil {
+			return fmt.Errorf("adopt relay: %w", err)
+		}
+		tok, err := relay.CurrentRegistrationToken()
+		if err != nil || strings.TrimSpace(tok) == "" {
+			return fmt.Errorf("adopt relay: no registration token in %s", adoptRelay)
+		}
+		relayToken = strings.TrimSpace(tok)
+		if !set_listen_given(addr) && relay.Listen != "" {
+			addr = relay.Listen // the relay's own port unless one was given
+		}
+	}
 	host, _, err := net.SplitHostPort(addr)
 	ip := net.ParseIP(host)
 	if err != nil || ip == nil || !ip.IsLoopback() {
@@ -549,6 +577,14 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 		return err
 	}
 	defer store.Close()
+	if relayToken != "" {
+		// The always-on daemon answers as the relay the browser already trusts:
+		// seed the operator credential with the relay's registration token so a
+		// client's stored token keeps working after the cutover.
+		if err := atomicWrite(filepath.Join(dir, "operator.token"), []byte(relayToken+"\n")); err != nil {
+			return fmt.Errorf("adopt relay: %w", err)
+		}
+	}
 	token, err := credential(dir, "operator.token")
 	if err != nil {
 		return err
@@ -573,6 +609,15 @@ func serve(dir, addr, origin string, diag io.Writer) error {
 	cfg.AllowLocalhostOrigins = &allowLocal
 	if origin != "" {
 		cfg.AllowedOrigins = append(cfg.AllowedOrigins, origin)
+	}
+	if relay != nil {
+		cfg.AllowedOrigins = append(cfg.AllowedOrigins, relay.AllowedOrigins...)
+		if cfg.Agents == nil {
+			cfg.Agents = map[string]config.Agent{}
+		}
+		for name, a := range relay.Agents {
+			cfg.Agents[name] = a // the operator's exact agent commands (models, args)
+		}
 	}
 	cfg.ResolveAgents(nil)
 	srv := server.New(cfg)

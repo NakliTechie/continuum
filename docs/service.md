@@ -41,3 +41,26 @@ Paths containing newlines are refused (they could inject unit directives), and
 every argument is XML-escaped (launchd) or systemd-quoted (`%`, `$`, quotes,
 backslash) before it reaches the unit file. Never expose this alpha on a public
 listener.
+
+## Cutover from menagerie-relay
+
+To make the always-on service the modern Continuum daemon while keeping a client
+that already trusts your `menagerie-relay` connected with no change:
+
+```sh
+continuum service cutover --state /abs/state --adopt-relay ~/.menagerie/relay.toml
+```
+
+`--adopt-relay` makes the daemon answer as the relay it replaces: the daemon
+listens on the relay's port, seeds its operator credential with the relay's
+registration token (so a client's stored token keeps working), and adopts the
+relay's allowed origins and agent commands. `cutover` also stops and backs up
+an installed `menagerie-relay` service (launchd agent or systemd unit) before
+loading the Continuum one, so the switch is reversible: the backup is
+`<unit>.cutover-bak-<date>`. If no relay service is installed, it simply installs
+the Continuum service adopting the config. Preview it all with
+`CONTINUUM_SERVICE_DRYRUN=1`.
+
+`serve --adopt-relay PATH` does the same adoption for a foreground run. After a
+cutover, browser-spawned PTY blocks gain holder-based restart survival, and the
+`/v1` door is available locally alongside the unchanged legacy WebSocket.

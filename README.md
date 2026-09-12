@@ -2,7 +2,7 @@
 
 One Go daemon per machine that owns your terminals and coding agents — durable history, explicit control, a CLI — so work outlives the client that started it. The runtime under [Menagerie](https://github.com/NakliTechie/menagerie).
 
-Public alpha, AGPL-3.0. The `/v1` API is a versioned contract (`continuum/v1`, contract 1.0 — negotiate with `continuum contract`; see [docs/v1-contract.md](docs/v1-contract.md)). Runs always-on via `continuum service install`; a cutover from the installed `menagerie-relay` service is not yet automated.
+Public alpha, AGPL-3.0. The `/v1` API is a versioned contract (`continuum/v1`, contract 1.0 — negotiate with `continuum contract`; see [docs/v1-contract.md](docs/v1-contract.md)). Runs always-on via `continuum service install`, or `continuum service cutover` to replace an installed `menagerie-relay` in place (adopting its port, token, origins and agents).
 
 ## What it does
 
@@ -44,7 +44,7 @@ Point Menagerie's Add-relay form at the `ws://` address `serve` prints, using `o
 
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI journey, legacy compatibility). Not yet done: automated cutover from the installed `menagerie-relay` service, structured-session (ACP) restart survival, native Linux and real-provider validation.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI journey, legacy compatibility). Not yet done: structured-session (ACP) restart survival, native Linux and real-provider validation.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions
