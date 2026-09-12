@@ -172,8 +172,16 @@ def main():
                 time.sleep(.03)
             assert not any(b['state'] == 'active' for b in rpc('status')['result']['blocks'])
             assert not any(p.suffix == '.sock' for p in (state / 'holders').iterdir()), 'holders left sockets behind'
+            cast = cli('export', '--block', offline['block_id'], code=8).stdout.decode()  # incomplete after the restart → markers + exit 8
+            castlines = [l for l in cast.splitlines() if l.strip()]
+            header = json.loads(castlines[0])
+            assert header['version'] == 3 and header['term']['cols'] > 0, header
+            events = [json.loads(l) for l in castlines[1:]]
+            assert all(len(e) == 3 and isinstance(e[0], (int, float)) and e[0] >= 0 and e[1] in ('o', 'i', 'm') for e in events), events
+            assert any(e[1] == 'o' and 'offline-marker' in e[2] for e in events), 'exported cast missing recorded output'
+            assert any(e[1] == 'm' for e in events), 'incomplete history must carry a marker'
             assert not (root / '.menagerie').exists(), 'modern mode wrote legacy home'
-            print('PASS: first run, auth, one writer, idempotency, two observers, control, offline replay, crash survival with holders, isolated capture')
+            print('PASS: first run, auth, one writer, idempotency, two observers, control, offline replay, crash survival with holders, asciicast v3 export, isolated capture')
         finally:
             for process, output in followers:
                 process.kill()

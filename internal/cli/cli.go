@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/NakliTechie/continuum/api"
+	"github.com/NakliTechie/continuum/internal/asciicast"
 	"github.com/NakliTechie/continuum/internal/config"
 	"github.com/NakliTechie/continuum/internal/holder"
 	"github.com/NakliTechie/continuum/internal/ipc"
@@ -48,6 +49,7 @@ Commands:
   attach --block ID        interactive screen-v1 terminal; Ctrl-] detaches
   screen --block ID        inspect a current/final screen without taking control; --json for frames
   events --block ID        replay bounded recorded events; --follow keeps watching
+  export --block ID        write the block's output as an asciicast v3 recording to stdout
   acquire --block ID       acquire 60-second input control and save it privately
   takeover --block ID      explicitly fence an existing controller
   renew --block ID         extend your current saved control lease
@@ -166,6 +168,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
 	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
+	format := f.String("format", "asciicast", "export format: asciicast (v3)")
 	f.Usage = func() {} // parse errors get one line below; -h prints the full help
 	if command == "attach" {
 		f.Usage = func() { fmt.Fprint(diag, attachHelp) }
@@ -214,7 +217,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return 0
 	}
 	switch command {
-	case "status", "open", "screen", "attach", "events", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
+	case "status", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
 	default:
 		fmt.Fprintln(diag, "unknown command; run continuum help")
 		return 2
@@ -246,6 +249,23 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if *take && command != "attach" {
 		fmt.Fprintln(diag, "--takeover is for attach")
 		return 2
+	}
+	if set["format"] && command != "export" {
+		fmt.Fprintln(diag, "--format is for export")
+		return 2
+	}
+	if command == "export" {
+		if *block == "" {
+			fmt.Fprintln(diag, "export replays one block; use --block ID")
+			return 2
+		}
+		if *format != "asciicast" {
+			fmt.Fprintln(diag, "supported export format: asciicast")
+			return 2
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		return exportCast(ctx, *state, *block, *observer, out, diag)
 	}
 	if command == "attach" {
 		if *machine || *request != "" {
@@ -582,4 +602,84 @@ var (
 	clients   = map[string]*http.Client{}
 )
 
-func readOperation(op string) bool { return op == "status" || op == "events" || op == "screen" }
+func readOperation(op string) bool {
+	return op == "status" || op == "events" || op == "screen" || op == "export"
+}
+
+// exportCast pages a block's journal and writes an asciicast v3 stream. It is a
+// client-side read: recording is what the journal already holds, and a gap in
+// that history becomes a marker event, never a silent time skip.
+func exportCast(ctx context.Context, dir, block string, observer bool, out, diag io.Writer) int {
+	cols, rows := 80, 24
+	if sv := call(ctx, dir, observer, api.Request{Operation: "screen", Block: block}); sv.Class == "ok" {
+		if frame, err := decodeScreen(sv, block); err == nil && frame.Frame.Cols > 0 {
+			cols, rows = frame.Frame.Cols, frame.Frame.Rows
+		}
+	}
+	aw, err := asciicast.NewWriter(out, asciicast.Header{Term: asciicast.Term{Cols: cols, Rows: rows, Type: "xterm-256color"}, Timestamp: time.Now().Unix(), Title: "continuum block " + block})
+	if err != nil {
+		fmt.Fprintln(diag, "export: could not write header")
+		return 5
+	}
+	var after uint64
+	degraded := false
+	firstPage := true
+	for {
+		v := call(ctx, dir, observer, api.Request{Operation: "events", Block: block, After: after})
+		if v.Class != "ok" && v.Class != "indeterminate" && v.Class != "history_gap" {
+			return render(v, false, diag, diag)
+		}
+		if v.Class == "indeterminate" || v.Class == "history_gap" {
+			degraded = true
+		}
+		var p journal.Page
+		if err := json.Unmarshal(v.Result, &p); err != nil {
+			fmt.Fprintln(diag, "export: unreadable events page")
+			return 8
+		}
+		if firstPage {
+			if p.First > 1 || p.Gap {
+				_ = aw.Marker("history before this point was not retained")
+			} else if v.Class == "indeterminate" {
+				_ = aw.Marker("history may be incomplete after an unclean daemon epoch")
+			}
+		}
+		firstPage = false
+		for _, e := range p.Events {
+			if e.Type != "output" {
+				continue
+			}
+			var d struct {
+				Data       string `json:"data"`
+				Unobserved bool   `json:"unobserved"`
+			}
+			if json.Unmarshal(e.Payload, &d) != nil {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(d.Data)
+			if err != nil {
+				continue
+			}
+			at, _ := time.Parse(time.RFC3339Nano, e.Time)
+			if d.Unobserved {
+				_ = aw.Marker("output produced while no daemon was attached")
+			}
+			if err := aw.Output(at, raw); err != nil {
+				return 5
+			}
+		}
+		if v.Class == "history_gap" {
+			_ = aw.Marker("cursor outside retained history")
+			break
+		}
+		after = p.Next
+		if p.Next >= p.Last {
+			break
+		}
+	}
+	if degraded {
+		fmt.Fprintln(diag, "export: history is incomplete; markers show where.")
+		return 8
+	}
+	return 0
+}
