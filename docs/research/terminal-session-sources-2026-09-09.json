@@ -8,7 +8,7 @@
       "repository": "https://github.com/theo-kirby/tmax",
       "revision": "844edddf1f0d7271c598c71e97e6be706decb5d6",
       "commit_time": "2026-09-09T14:42:18+02:00",
-      "clone_path": "~/Code/continuum-reference/tmax",
+      "clone_path": "../continuum-reference/tmax",
       "license_observed": "No LICENSE file or license declaration found in the 22 tracked files; clarify before copying code.",
       "kind": "requested repository",
       "source_map": [
@@ -28,7 +28,7 @@
       "repository": "https://github.com/maddada/Ghostex",
       "revision": "0e177a191177bca0c48c51e04c75a785125f7a19",
       "commit_time": "2026-09-08T06:44:13Z",
-      "clone_path": "~/Code/continuum-reference/ghostex",
+      "clone_path": "../continuum-reference/ghostex",
       "license_observed": "MIT text",
       "kind": "requested repository",
       "source_map": [
@@ -52,7 +52,7 @@
       "repository": "https://github.com/cablehead/stacks2099",
       "revision": "7c0d19eeb8c56ac8826480cb491bc055ca188a8b",
       "commit_time": "2026-09-02T14:54:49-04:00",
-      "clone_path": "~/Code/continuum-reference/stacks2099",
+      "clone_path": "../continuum-reference/stacks2099",
       "license_observed": "MIT",
       "kind": "requested repository",
       "source_map": [
@@ -75,7 +75,7 @@
       "repository": "https://github.com/cablehead/ptyZZZ",
       "revision": "d23e046dff3b389d0a8a70929087bbfb2007ee5e",
       "commit_time": "2026-09-07T21:39:12Z",
-      "clone_path": "~/Code/continuum-reference/ptyZZZ",
+      "clone_path": "../continuum-reference/ptyZZZ",
       "license_observed": "MIT",
       "kind": "requested repository",
       "source_map": [
@@ -97,7 +97,7 @@
       "repository": "https://github.com/maddada/zmx",
       "revision": "bf63622fab579ebf21ee782a876c7dbc4339d817",
       "commit_time": "2026-09-07T13:11:38+04:00",
-      "clone_path": "~/Code/continuum-reference/ghostex/.dependencies/zmx",
+      "clone_path": "../continuum-reference/ghostex/.dependencies/zmx",
       "license_observed": "MIT text",
       "kind": "Ghostex pinned submodule, inspected for persistence/VT implementation",
       "source_map": [

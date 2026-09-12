@@ -1,6 +1,6 @@
 # Continuum
 
-> **Lifecycle:** living — local alpha implemented on the development branch; broader first-release work remains.
+> **Lifecycle:** living — local alpha on `main` (private daemon + CLI, legacy Menagerie compatibility); not yet a release. Source is public so Menagerie can depend on it directly; there is no installer, no service cutover, and no stability promise for the `/v1` contract yet. Licensed AGPL-3.0 (see LICENSE and NOTICE for the Menagerie relay lineage).
 
 A durable runtime for local and remote work. Terminals, coding agents, background jobs, and services share sessions, history, structured events, and controls that people and software can use equally.
 

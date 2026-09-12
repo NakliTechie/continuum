@@ -19,7 +19,7 @@ Primary entry points: [tmax](https://github.com/theo-kirby/tmax/blob/844edddf1f0
 
 ## 2. What “server-side terminal” means for Continuum
 
-Continuum alpha has a PTY byte path, a retained event journal and a browser using xterm.js. It has **no canonical VT screen model**. Its `/bin/cat` walkthrough established shared process/output observation, not full-screen TUI recovery or detached terminal-query handling. See [PTY implementation](~/Code/continuum/internal/pty/session.go:78), [journal](~/Code/continuum/internal/journal/journal.go:235) and [alpha contract](~/Code/continuum/docs/local-alpha.md).
+Continuum alpha has a PTY byte path, a retained event journal and a browser using xterm.js. It has **no canonical VT screen model**. Its `/bin/cat` walkthrough established shared process/output observation, not full-screen TUI recovery or detached terminal-query handling. See [PTY implementation](internal/pty/session.go:78), [journal](internal/journal/journal.go:235) and [alpha contract](docs/local-alpha.md).
 
 Keep these guarantees separate:
 
