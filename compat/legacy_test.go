@@ -433,15 +433,32 @@ func TestPTYOutputWhileDisconnected(t *testing.T) {
 func TestRestartWithTmuxAdoptsTheRunningAgent(t *testing.T) {
 	h := startRelayWith(t, true)
 	c := h.connect(t, true)
-	id, token := h.spawn(t, c, "pty", nil, "")
-	send(t, c, frame{"type": "input", "session_id": id, "session_token": token, "data": "before-restart\n"})
-	until(t, c, func(f frame) bool {
-		if f["type"] != "output" {
+	// The agent prefixes every echoed line with its own PID, so the identity
+	// of the process behind the session is observable across the restart: a
+	// respawned shell would answer with a different number.
+	send(t, c, frame{"type": "spawn", "agent": "custom", "transport": "pty", "cwd": h.home,
+		"args": []string{"/bin/sh", "-c", `while read l; do echo "$$:$l"; done`}, "env": map[string]string{}, "client_id": "test-restart"})
+	spawned := until(t, c, func(f frame) bool { return f["type"] == "spawned" })
+	id, token := text(t, spawned, "session_id"), text(t, spawned, "session_token")
+	echoed := func(conn *websocket.Conn, marker string) string {
+		var pid string
+		until(t, conn, func(f frame) bool {
+			if f["type"] != "output" || f["seq"] == float64(-1) {
+				return false
+			}
+			b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
+			for _, line := range strings.Split(string(b), "\n") {
+				if i := strings.Index(line, ":"+marker); i > 0 {
+					pid = strings.TrimSpace(line[:i])
+					return true
+				}
+			}
 			return false
-		}
-		b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
-		return strings.Contains(string(b), "before-restart")
-	})
+		})
+		return pid
+	}
+	send(t, c, frame{"type": "input", "session_id": id, "session_token": token, "data": "before-restart\n"})
+	before := echoed(c, "before-restart")
 	_ = c.CloseNow()
 	h.crash(t)
 	h.launch(t)
@@ -460,12 +477,9 @@ func TestRestartWithTmuxAdoptsTheRunningAgent(t *testing.T) {
 	attached := until(t, d, func(f frame) bool { return f["type"] == "attached" })
 	fresh := text(t, attached, "session_token")
 	send(t, d, frame{"type": "input", "session_id": id, "session_token": fresh, "data": "after-restart\n"})
-	until(t, d, func(f frame) bool {
-		if f["type"] != "output" || f["seq"] == float64(-1) {
-			return false
-		}
-		b, _ := base64.StdEncoding.DecodeString(text(t, f, "data"))
-		return strings.Contains(string(b), "after-restart")
-	})
+	after := echoed(d, "after-restart")
+	if before == "" || before != after {
+		t.Fatalf("the session is not the same process across restart: pid %q before, %q after", before, after)
+	}
 	stop(t, d, id, fresh)
 }
