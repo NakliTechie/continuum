@@ -16,6 +16,8 @@ The engine consumes PTY output and returns terminal-generated replies independen
 
 A revision identifies a complete visible frame. It is independent of the durable journal cursor. A snapshot is not serialized parser state, a complete terminal-state dump, or a valid point from which to replay arbitrary raw bytes. A client using this contract must continue displaying complete server frames; any later diff protocol must identify and check its exact base. Engine state is memory-only and cannot promise process or screen survival across daemon restart.
 
+While the application has synchronized output set (DEC private mode 2026), `Snapshot()` keeps returning the frame from before the update began, at its old revision, until the application resets the mode or 150 ms pass — whichever is first. Viewers therefore never poll a half-drawn screen; an application that sets the mode and stalls cannot freeze them. Repeated snapshots at one revision reuse the last rendered frame; rows are copied so callers own what they receive.
+
 ## Bounds and failure behavior
 
 - At most 240 columns, 100 rows and 19,200 visible cells. Both primary and alternate grids are bounded.

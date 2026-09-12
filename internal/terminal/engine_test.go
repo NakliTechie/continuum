@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newEngine(t *testing.T, c, r int) Engine {
@@ -165,5 +166,44 @@ func TestSnapshotIsCachedPerRevision(t *testing.T) {
 	c := e.Snapshot()
 	if c.Revision == b.Revision || !strings.HasPrefix(c.Lines[0], "hello world") {
 		t.Fatalf("write did not invalidate the cached frame: rev %d vs %d %q", c.Revision, b.Revision, c.Lines[0])
+	}
+}
+
+// While an application has synchronized output (DEC 2026) set, viewers keep
+// the frame from before the update began — never a half-drawn one — until the
+// application releases it or the ceiling passes; a release that arrives in a
+// later feed still ends the hold, and a pair split across feeds counts once.
+func TestSynchronizedOutputHoldsThePreviousFrame(t *testing.T) {
+	e := newEngine(t, 20, 3)
+	feed(t, e, "one\r\n")
+	before := e.Snapshot()
+	feed(t, e, "\x1b[?2026h\x1b[2J\x1b[Htw")
+	held := e.Snapshot()
+	if held.Revision != before.Revision || held.Lines[0] != before.Lines[0] {
+		t.Fatalf("hold leaked a half-drawn frame: before %+v held %+v", before.Lines, held.Lines)
+	}
+	feed(t, e, "o\r\n\x1b[?2026l")
+	after := e.Snapshot()
+	if after.Revision == before.Revision || !strings.HasPrefix(after.Lines[0], "two") {
+		t.Fatalf("release did not publish the finished frame: %+v", after.Lines)
+	}
+	// An unreleased hold expires at the ceiling instead of freezing viewers.
+	feed(t, e, "\x1b[?2026h\x1b[2J\x1b[Hstuck")
+	if s := e.Snapshot(); !strings.HasPrefix(s.Lines[0], "two") {
+		t.Fatalf("hold should still show the previous frame: %q", s.Lines[0])
+	}
+	time.Sleep(SyncHoldCeiling + 20*time.Millisecond)
+	if s := e.Snapshot(); !strings.HasPrefix(s.Lines[0], "stuck") {
+		t.Fatalf("ceiling did not release the hold: %q", s.Lines[0])
+	}
+	// A second set while already held does not restart the ceiling.
+	feed(t, e, "\x1b[?2026h")
+	feed(t, e, "\x1b[?2026h\x1b[2J\x1b[Hagain")
+	if s := e.Snapshot(); !strings.HasPrefix(s.Lines[0], "stuck") {
+		t.Fatalf("nested set leaked: %q", s.Lines[0])
+	}
+	feed(t, e, "\x1b[?2026l")
+	if s := e.Snapshot(); !strings.HasPrefix(s.Lines[0], "again") {
+		t.Fatalf("release after nested set failed: %q", s.Lines[0])
 	}
 }
