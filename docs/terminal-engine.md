@@ -27,7 +27,7 @@ While the application has synchronized output set (DEC private mode 2026), `Snap
 - The upstream parser allocates a 4 MiB data buffer. These are component limits, not a measured whole-process memory budget or a hostile-code sandbox.
 - Invalid requested dimensions fail without changing the screen. An over-limit output stream becomes explicitly faulted, refuses further parsing and marks every later snapshot stale through its `fault` field. Callers must surface that fault instead of continuing to present the screen as current.
 
-Legacy raw output recording remains a separate data source. These limits must not silently truncate it or silently convert legacy sessions to the experimental engine.
+PTY recording remains a separate policy-controlled data source (`none`, visible frame, N lines, or full raw output). These engine limits must not silently truncate a `full` recording or silently convert legacy sessions to the experimental engine.
 
 ## Executed checks and known gaps
 

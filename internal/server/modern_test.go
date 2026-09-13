@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -69,7 +70,7 @@ func TestModernObserversAndLegacyFencing(t *testing.T) {
 	if r := call("viewer", api.Request{Operation: "open"}); r.Class != "access_denied" {
 		t.Fatal(r)
 	}
-	for _, op := range []string{"input", "stop", "acquire", "takeover", "release", "renew", "resize"} {
+	for _, op := range []string{"input", "stop", "acquire", "takeover", "release", "renew", "resize", "purge", "retire"} {
 		r := call("viewer", api.Request{Operation: op, RequestID: "viewer-" + op, Block: "0123456789abcdef", Lease: "x", Data: "y", Cols: 80, Rows: 24})
 		if r.Class != "access_denied" || r.Code != "operator_required" {
 			t.Fatalf("observer %s: %+v", op, r)
@@ -109,6 +110,54 @@ func TestModernObserversAndLegacyFencing(t *testing.T) {
 	m.leases[id] = structLeaseExpired(fresh)
 	if r := call("operator", api.Request{Operation: "resize", RequestID: "expired", Block: id, Lease: fresh, Cols: 80, Rows: 24}); r.Code != "stale_control" {
 		t.Fatal(r)
+	}
+}
+
+func TestRecordingPolicyValidationAndManagement(t *testing.T) {
+	m, call := modernTest(t)
+	cwd := t.TempDir()
+	if r := call("operator", api.Request{Operation: "open", RequestID: "bad-visible", Recording: journal.RecordingVisible, Cwd: cwd, Args: []string{"/bin/cat"}}); r.Code != "recording" {
+		t.Fatalf("visible without screen-v1: %+v", r)
+	}
+	if r := call("operator", api.Request{Operation: "open", RequestID: "bad-lines", Recording: journal.RecordingLines, RecordingLines: 0, Cwd: cwd, Args: []string{"/bin/cat"}}); r.Code != "recording" {
+		t.Fatalf("invalid line count: %+v", r)
+	}
+
+	active := value(t, call("operator", api.Request{Operation: "open", RequestID: "active", Recording: journal.RecordingNone, Cwd: cwd, Args: []string{"/bin/cat"}}), "block_id")
+	if r := call("operator", api.Request{Operation: "purge", RequestID: "purge-active", Block: active}); r.Code != "block_active" {
+		t.Fatalf("active purge: %+v", r)
+	}
+	if r := call("operator", api.Request{Operation: "retire", RequestID: "retire-active", Block: active}); r.Code != "block_active" {
+		t.Fatalf("active retire: %+v", r)
+	}
+
+	visible := value(t, call("operator", api.Request{Operation: "open", RequestID: "visible", Terminal: "screen-v1", Cols: 80, Rows: 24, Recording: journal.RecordingVisible, Cwd: cwd, Args: []string{"/bin/sh", "-c", "printf visible-final"}}), "block_id")
+	deadline := time.Now().Add(3 * time.Second)
+	for m.s.entry(visible) != nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.s.entry(visible) != nil {
+		t.Fatal("visible block did not exit")
+	}
+	// Drop the volatile post-exit cache to prove the visible policy also left a
+	// committed screen that survives daemon memory loss.
+	m.retiredMu.Lock()
+	delete(m.retired, visible)
+	m.retiredMu.Unlock()
+	if r := call("viewer", api.Request{Operation: "screen", Block: visible}); r.Class != "ok" || r.Durability != "committed" || !bytes.Contains(r.Result, []byte("visible-final")) {
+		t.Fatalf("durable visible screen: %+v", r)
+	}
+	if r := call("operator", api.Request{Operation: "purge", RequestID: "purge-visible", Block: visible}); r.Class != "ok" {
+		t.Fatalf("purge: %+v", r)
+	}
+	if r := call("viewer", api.Request{Operation: "screen", Block: visible}); r.Code != "screen_unavailable" {
+		t.Fatalf("purged screen remains: %+v", r)
+	}
+	if r := call("operator", api.Request{Operation: "retire", RequestID: "retire-visible", Block: visible}); r.Class != "ok" {
+		t.Fatalf("retire: %+v", r)
+	}
+	if _, err := m.Store.Block(visible); !errors.Is(err, journal.ErrNotFound) {
+		t.Fatalf("retired record remains: %v", err)
 	}
 }
 func structLeaseExpired(token string) lease { return lease{token, time.Now().Add(-time.Second)} }

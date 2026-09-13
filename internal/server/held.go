@@ -9,6 +9,7 @@ import (
 
 	"github.com/NakliTechie/continuum/internal/config"
 	"github.com/NakliTechie/continuum/internal/holder"
+	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/pty"
 	"golang.org/x/sys/unix"
 )
@@ -128,7 +129,13 @@ func (s *Server) adoptHeld(r holder.Record) {
 	if a.Hello.RingStart > resume {
 		dropped = a.Hello.RingStart - resume // downtime output past the 256 KiB ring
 	}
+	recording, recordingLines := journal.RecordingFull, 0
 	if m := s.modern; m != nil {
+		if block, blockErr := m.Store.Block(r.Block); blockErr == nil {
+			recording, recordingLines = block.Recording, block.RecordingLines
+		} else {
+			m.degraded.Store(true)
+		}
 		if err := m.Store.Reactivate(r.Block, a.Hello.PID); err != nil {
 			m.degraded.Store(true)
 		}
@@ -137,7 +144,7 @@ func (s *Server) adoptHeld(r holder.Record) {
 	// this event; the event says how much of the coming output no daemon saw.
 	s.record(r.Block, "adopted", map[string]any{"held": true, "pid": a.Hello.PID, "gap_bytes": a.Gap, "dropped_bytes": dropped, "screen": opts != nil})
 	s.mu.Lock()
-	s.sessions[r.Block] = &sessionEntry{token: token, sess: sess, agent: a.Hello.Agent, startedAt: started, pid: a.Hello.PID}
+	s.sessions[r.Block] = &sessionEntry{token: token, sess: sess, agent: a.Hello.Agent, startedAt: started, pid: a.Hello.PID, recording: recording, recordingLines: recordingLines}
 	s.mu.Unlock()
 	log.Printf("adopted %s (agent=%s pid=%d gap=%d dropped=%d)", r.Block, a.Hello.Agent, a.Hello.PID, a.Gap, dropped)
 	s.runSession(r.Block, sess)

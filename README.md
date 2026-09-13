@@ -9,7 +9,7 @@ Public alpha, AGPL-3.0. The `/v1` API is a versioned contract (`continuum/v1`, c
 - **Work survives the client.** Close the tab, drop the network, `kill -9` the daemon — the process keeps running under a per-block holder, and the daemon re-adopts it on restart with the same block ID and PID. Any gap is marked, never hidden.
 - **Two doors, one core.** The same binary speaks Menagerie's legacy WebSocket (unchanged) and a versioned `/v1` contract on a private Unix socket — `continuum contract` reports the version and capabilities. One process manager, one journal, one lease model.
 - **Observe without stealing.** Many viewers can watch a block; control is a 60-second lease, explicit and revocable.
-- **Durable, honest history.** Every event is journaled; retention limits and capture failures surface as typed gaps, not silence. Export a block as asciicast v3.
+- **Durable, honest history.** Choose `none`, a committed visible screen, the last N lines, or full raw output per block; lifecycle records remain durable. Retention limits, purge, and capture failures are explicit. Export retained output as asciicast v3.
 
 ## Quick start
 
@@ -26,6 +26,15 @@ In another terminal:
 ./bin/continuum open -- /bin/sh
 ./bin/continuum status
 ./bin/continuum events --block BLOCK_ID --follow --text
+```
+
+Choose retention when opening a block, then manage it explicitly:
+
+```sh
+./bin/continuum open --recording lines:500 -- /bin/sh
+./bin/continuum purge --block BLOCK_ID      # exited blocks; keep lifecycle metadata
+./bin/continuum retire --block BLOCK_ID     # exited blocks only
+./bin/continuum compact                     # stop the daemon first
 ```
 
 `serve` writes private credentials and a `v1.sock` under your config dir and opens a loopback port for Menagerie only. Use `--state /abs/path` to isolate a workspace; `continuum help` lists every command. Never put this alpha on a public listener.

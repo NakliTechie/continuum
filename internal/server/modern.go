@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/pty"
 	"github.com/NakliTechie/continuum/internal/terminal"
@@ -36,10 +38,10 @@ const ContractVersion = "1.0"
 // a pinned test guards it.
 var (
 	stableCapabilities       = []string{"pty", "observers", "control_lease", "event_replay", "control_renewal", "legacy_1.3"}
-	experimentalCapabilities = []string{"terminal_screen_v1", "terminal_input_base64"}
+	experimentalCapabilities = []string{"terminal_screen_v1", "terminal_input_base64", "recording_policy_v1"}
 	// stableOperations is the frozen /v1 operation vocabulary. version/status/
 	// events/screen are reads; the rest mutate through the request-id ledger.
-	stableOperations = []string{"version", "status", "events", "screen", "open", "acquire", "renew", "release", "takeover", "input", "resize", "stop"}
+	stableOperations = []string{"version", "status", "events", "screen", "open", "acquire", "renew", "release", "takeover", "input", "resize", "stop", "purge", "retire"}
 )
 
 func allCapabilities() []string {
@@ -78,10 +80,57 @@ func (s *Server) record(id, kind string, payload any) {
 }
 func (s *Server) recordOutput(id string, b []byte, unobserved bool) {
 	if m := s.modern; m != nil {
-		if err := m.Store.AppendOutput(id, b, unobserved); err != nil {
+		e := s.entry(id)
+		mode := journal.RecordingFull
+		var err error
+		if e != nil {
+			mode, _, err = journal.NormalizeRecording(e.recording, e.recordingLines)
+		} else if block, blockErr := m.Store.Block(id); blockErr != nil {
+			err = blockErr
+		} else {
+			mode = block.Recording
+		}
+		if err != nil {
+			m.degraded.Store(true)
+			return
+		}
+		if mode == journal.RecordingVisible {
+			if e == nil {
+				// A holder can report an exited block before a restarted daemon
+				// has an engine to rebuild its final frame. Preserve the resume
+				// offset and mark only this recording incomplete; the store itself
+				// remains healthy and usable.
+				err = m.Store.AdvanceOutput(id, len(b))
+				if err == nil {
+					err = m.Store.MarkIncomplete(id)
+				}
+			} else if sess := s.entrySess(e); sess == nil {
+				err = errors.New("visible recording requires a PTY terminal")
+			} else if frame, ok := sess.TerminalSnapshot(); !ok {
+				err = errors.New("visible recording requires screen-v1")
+			} else {
+				err = m.Store.AppendOutputScreen(id, b, frame, renderRecordedScreen(frame), unobserved)
+			}
+		} else {
+			err = m.Store.AppendOutput(id, b, unobserved)
+		}
+		if err != nil {
 			m.degraded.Store(true)
 		}
 	}
+}
+
+func renderRecordedScreen(frame terminal.Snapshot) []byte {
+	var out strings.Builder
+	out.WriteString("\x1b[2J\x1b[H")
+	out.WriteString(strings.Join(frame.ANSI, "\r\n"))
+	fmt.Fprintf(&out, "\x1b[%d;%dH", frame.Cursor.Y+1, frame.Cursor.X+1)
+	if frame.Cursor.Visible {
+		out.WriteString("\x1b[?25h")
+	} else {
+		out.WriteString("\x1b[?25l")
+	}
+	return []byte(out.String())
 }
 func (s *Server) recordStructured(id, kind string, payload any) {
 	if m := s.modern; m != nil {
@@ -121,7 +170,7 @@ func (m *Modern) activeBlocks() (int, error) {
 }
 
 func (m *Modern) recordBlock(id string, e *sessionEntry) {
-	if err := m.Store.AddBlock(journal.Block{ID: id, Agent: e.agent, PID: e.pid, State: "active", Started: e.startedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
+	if err := m.Store.AddBlock(journal.Block{ID: id, Agent: e.agent, PID: e.pid, State: "active", Started: e.startedAt.UTC().Format(time.RFC3339Nano), Recording: e.recording, RecordingLines: e.recordingLines}); err != nil {
 		m.degraded.Store(true)
 	}
 	m.s.record(id, "opened", map[string]any{"agent": e.agent, "pid": e.pid})
@@ -161,8 +210,8 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error("", "invalid_request", "request", "one JSON object required", "help"))
 		return
 	}
-	if len(q.RequestID) > 128 || len(q.Block) > 128 || len(q.Lease) > 128 {
-		reply(api.Error("", "invalid_request", "field_size", "identifier exceeds 128 bytes", "help"))
+	if len(q.RequestID) > 128 || len(q.Block) > 128 || len(q.Lease) > 128 || len(q.Recording) > 32 {
+		reply(api.Error("", "invalid_request", "field_size", "request field exceeds its size limit", "help"))
 		return
 	}
 	read := q.Operation == "version" || q.Operation == "status" || q.Operation == "events" || q.Operation == "screen"
@@ -261,7 +310,7 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		return api.Error(q.RequestID, "invalid_request", code, msg, "help")
 	}
 	switch q.Operation {
-	case "open", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
+	case "open", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire":
 	default:
 		return api.Error(q.RequestID, "unsupported", "operation", "unsupported operation", "help")
 	}
@@ -269,6 +318,13 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		return bad("request_id", "mutations require a stable request_id")
 	}
 	if q.Operation == "open" {
+		mode, _, err := journal.NormalizeRecording(q.Recording, q.RecordingLines)
+		if err != nil {
+			return bad("recording", err.Error())
+		}
+		if mode == journal.RecordingVisible && q.Terminal != "screen-v1" {
+			return bad("recording", "visible recording requires terminal screen-v1")
+		}
 		if q.Terminal != "" && q.Terminal != "screen-v1" {
 			return bad("terminal_profile", "supported terminal profile: screen-v1")
 		}
@@ -289,8 +345,13 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		if info, err := os.Stat(q.Cwd); err != nil || !info.IsDir() {
 			return bad("cwd", "working directory does not exist")
 		}
-	} else if q.Block == "" {
-		return bad("block_id", "block_id required")
+	} else {
+		if q.Recording != "" || q.RecordingLines != 0 {
+			return bad("recording", "recording fields are only valid for open")
+		}
+		if q.Block == "" {
+			return bad("block_id", "block_id required")
+		}
 	}
 	if q.Operation == "resize" && (q.Cols < 1 || q.Cols > 1000 || q.Rows < 1 || q.Rows > 1000) {
 		return bad("size", "columns and rows must be between 1 and 1000")
@@ -327,7 +388,8 @@ func (m *Modern) mutate(q api.Request) api.Response {
 	}
 	if old == nil {
 		// A request that cannot have an effect never occupies the ledger.
-		if q.Operation != "open" && m.s.entry(q.Block) == nil {
+		requiresRunning := q.Operation == "acquire" || q.Operation == "takeover" || q.Operation == "renew" || q.Operation == "release" || q.Operation == "input" || q.Operation == "resize" || q.Operation == "stop"
+		if requiresRunning && m.s.entry(q.Block) == nil {
 			return api.Error(q.RequestID, "conflict", "not_running", "block has no running process", "status")
 		}
 		if old, err = m.Store.Begin(q.RequestID, digest); err != nil {
@@ -369,6 +431,7 @@ func (m *Modern) effect(q api.Request) api.Response {
 		return api.Error(q.RequestID, class, code, msg, next)
 	}
 	if q.Operation == "open" {
+		recording, recordingLines, _ := journal.NormalizeRecording(q.Recording, q.RecordingLines)
 		if active, err := m.activeBlocks(); err != nil || active >= journal.MaxBlocks {
 			return fail("resource_exhausted", "block_limit", "state supports at most 1024 active blocks", "status")
 		}
@@ -376,7 +439,7 @@ func (m *Modern) effect(q api.Request) api.Response {
 			return fail("resource_exhausted", "terminal_limit", "at most 16 server-owned terminals may run concurrently", "status")
 		}
 		var response map[string]any
-		cn := &conn{srv: m.s, ctx: context.Background(), registered: true, sink: func(b []byte) error {
+		cn := &conn{srv: m.s, ctx: context.Background(), registered: true, recording: recording, recordingLines: recordingLines, sink: func(b []byte) error {
 			var v map[string]any
 			_ = json.Unmarshal(b, &v)
 			if v["type"] == "spawned" || v["type"] == "error" {
@@ -392,7 +455,44 @@ func (m *Modern) effect(q api.Request) api.Response {
 		if response == nil || response["type"] != "spawned" {
 			return fail("invalid_request", "spawn_failed", "could not launch executable in the selected directory", "help")
 		}
-		return api.Result(q.RequestID, map[string]any{"block_id": response["session_id"], "pid": response["pid"], "terminal": q.Terminal})
+		return api.Result(q.RequestID, map[string]any{"block_id": response["session_id"], "pid": response["pid"], "terminal": q.Terminal, "recording": recording, "recording_lines": recordingLines})
+	}
+	if q.Operation == "purge" {
+		if err := m.Store.PurgeRecording(q.Block); err != nil {
+			switch {
+			case errors.Is(err, journal.ErrNotFound):
+				return fail("conflict", "not_found", "block is not recorded", "status")
+			case errors.Is(err, journal.ErrActive):
+				return fail("conflict", "block_active", "only an exited block can be purged; stop active work or reconcile an interrupted block first", "status")
+			}
+			return fail("resource_exhausted", "store_write", "could not purge recording", "status")
+		}
+		m.retiredMu.Lock()
+		delete(m.retired, q.Block)
+		m.retiredMu.Unlock()
+		return api.Result(q.RequestID, map[string]any{"block_id": q.Block, "recording_purged": true})
+	}
+	if q.Operation == "retire" {
+		if err := m.Store.Retire(q.Block); err != nil {
+			switch {
+			case errors.Is(err, journal.ErrNotFound):
+				return fail("conflict", "not_found", "block is not recorded", "status")
+			case errors.Is(err, journal.ErrActive):
+				return fail("conflict", "block_active", "only an exited block can be retired; stop active work or reconcile an interrupted block first", "status")
+			default:
+				return fail("resource_exhausted", "store_write", "could not retire block", "status")
+			}
+		}
+		m.retiredMu.Lock()
+		delete(m.retired, q.Block)
+		for i, id := range m.retiredOrder {
+			if id == q.Block {
+				m.retiredOrder = append(m.retiredOrder[:i], m.retiredOrder[i+1:]...)
+				break
+			}
+		}
+		m.retiredMu.Unlock()
+		return api.Result(q.RequestID, map[string]any{"block_id": q.Block, "retired": true})
 	}
 	e := m.s.entry(q.Block)
 	if e == nil {

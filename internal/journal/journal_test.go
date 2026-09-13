@@ -94,6 +94,63 @@ func TestSchemaRefusesFutureVersion(t *testing.T) {
 		t.Fatal("future schema accepted")
 	}
 }
+
+func TestSchemaOneMigratesAtomicallyAndFencesOldBinaries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state.db")
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucket([]byte("meta"))
+		if err != nil {
+			return err
+		}
+		if err := meta.Put([]byte("schema"), []byte("1")); err != nil {
+			return err
+		}
+		blocks, err := tx.CreateBucket([]byte("blocks"))
+		if err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(Block{ID: "legacy", State: "exited"})
+		return blocks.Put([]byte("legacy"), raw)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := s.Block("legacy")
+	if err != nil || block.Recording != RecordingFull {
+		t.Fatalf("legacy block policy: %+v %v", block, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.View(func(tx *bolt.Tx) error {
+		if got := string(tx.Bucket([]byte("meta")).Get([]byte("schema"))); got != "2" {
+			t.Fatalf("schema = %q, want 2", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestFilteredReplayAdvancesAndByteBudget(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {

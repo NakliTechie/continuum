@@ -62,6 +62,7 @@ def main():
             contract = contract_env['result']
             assert contract['contract'] == 'continuum/v1' and contract['contract_version'] == '1.0' and contract['schema_version'] == 1, contract
             assert 'pty' in contract['capabilities']['stable'] and 'terminal_screen_v1' in contract['capabilities']['experimental'], contract
+            assert 'recording_policy_v1' in contract['capabilities']['experimental'], contract
             assert contract['process_restart_survival'] is True, contract
             initial = rpc('status')['result']
             assert initial['total'] == 0
@@ -116,6 +117,25 @@ def main():
             assert b'\x1b]52;c;c2VjcmV0\x07' in raw, raw
             cli('events', '--block', offline['block_id'], '--text', '--raw', code=2)
             assert any(b['pid'] == offline['pid'] for b in rpc('status')['result']['blocks'])
+
+            none = rpc('open', '--recording', 'none', '--cwd', str(root), '--',
+                       '/bin/sh', '-c', 'printf never-retain-this')['result']
+            lines = rpc('open', '--recording', 'lines:2', '--cwd', str(root), '--',
+                        '/bin/sh', '-c', "printf 'one\\ntwo\\nthree'")['result']
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                states = {b['id']: b for b in rpc('status')['result']['blocks']}
+                if states[none['block_id']]['state'] == states[lines['block_id']]['state'] == 'exited':
+                    break
+                time.sleep(.03)
+            assert states[none['block_id']]['state'] == states[lines['block_id']]['state'] == 'exited', states
+            assert states[none['block_id']]['recording'] == 'none'
+            none_events = [json.loads(line) for line in cli('events', '--block', none['block_id'], '--json').stdout.splitlines()]
+            assert not any(e['type'] == 'output' for e in none_events)
+            line_events = [json.loads(line) for line in cli('events', '--block', lines['block_id'], '--json').stdout.splitlines()]
+            line_output = b''.join(base64.b64decode(e['payload']['data']) for e in line_events if e['type'] == 'output')
+            assert line_output.replace(b'\r', b'') == b'two\nthree', line_output
+            assert states[lines['block_id']]['recording'] == 'lines' and states[lines['block_id']]['recording_lines'] == 2
 
             rpc('resize', '--block', block, '--cols', '120', '--rows', '40')
             rpc('stop', '--block', block)
@@ -187,8 +207,19 @@ def main():
             assert all(len(e) == 3 and isinstance(e[0], (int, float)) and e[0] >= 0 and e[1] in ('o', 'i', 'm') for e in events), events
             assert any(e[1] == 'o' and 'offline-marker' in e[2] for e in events), 'exported cast missing recorded output'
             assert any(e[1] == 'm' for e in events), 'incomplete history must carry a marker'
+            purged = rpc('purge', '--block', offline['block_id'])
+            assert purged['result']['recording_purged'] is True
+            purged_events = rpc('events', '--block', offline['block_id'], code=8)['result']
+            assert purged_events['recording_purged'] and not any(e['type'] == 'output' for e in purged_events['events'])
+            assert rpc('retire', '--block', leaver['block_id'])['result']['retired'] is True
+            assert not any(b['id'] == leaver['block_id'] for b in rpc('status')['result']['blocks'])
             assert not (root / '.menagerie').exists(), 'modern mode wrote legacy home'
-            print('PASS: first run, auth, one writer, idempotency, two observers, control, offline replay, crash survival with holders, asciicast v3 export, isolated capture')
+            daemon.send_signal(signal.SIGTERM)
+            daemon.wait(timeout=5)
+            daemon = None
+            compacted = rpc('compact')['result']
+            assert compacted['before_bytes'] > 0 and compacted['after_bytes'] > 0
+            print('PASS: first run, auth, one writer, idempotency, recording policies, purge/retire/compact, two observers, control, offline replay, crash survival with holders, asciicast v3 export, isolated capture')
         finally:
             for process, output in followers:
                 process.kill()

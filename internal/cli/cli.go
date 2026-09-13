@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,6 +52,9 @@ Commands:
   contract                 print the /v1 contract version and capabilities (--json for the full record)
   events --block ID        replay bounded recorded events; --follow keeps watching
   export --block ID        write the block's output as an asciicast v3 recording to stdout
+  purge --block ID         delete an exited block's output but keep lifecycle records
+  retire --block ID        delete an exited block and all of its retained state
+  compact                  reclaim unused state.db pages; daemon must be stopped
   acquire --block ID       acquire 60-second input control and save it privately
   takeover --block ID      explicitly fence an existing controller
   renew --block ID         extend your current saved control lease
@@ -69,6 +73,7 @@ Events: --after CURSOR, --follow, --text (printable text and colour only),
 Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
 Observation: --observer uses the read-only observer credential.
 Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into server-owned screens.
+Recording: open --recording none|visible|lines:N|full (default full); visible requires screen-v1.
 Attach: --observer is read-only; --takeover explicitly replaces a controller.
 Keyboard plus common combining/CJK/emoji-ZWJ output is covered; mouse, IME and advanced TUI compatibility remain experimental.
 
@@ -180,6 +185,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	listen := f.String("listen", "127.0.0.1:0", "loopback address")
 	origin := f.String("origin", "", "additional trusted Menagerie origin")
 	profile := f.String("terminal", "", "open terminal profile: screen-v1 (experimental)")
+	recording := f.String("recording", "", "open recording policy: none, visible, lines:N, or full")
 	adoptRelay := f.String("adopt-relay", "", "serve/service: adopt a menagerie-relay config (token, port, origins, agents)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
 	format := f.String("format", "asciicast", "export format: asciicast (v3)")
@@ -250,7 +256,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return service(*state, *listen, *origin, *adoptRelay, []string{sub}, out, diag)
 	}
 	switch command {
-	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop":
+	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire", "compact":
 	default:
 		fmt.Fprintln(diag, "unknown command; run continuum help")
 		return 2
@@ -279,6 +285,10 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		fmt.Fprintln(diag, "--terminal is for open")
 		return 2
 	}
+	if set["recording"] && command != "open" {
+		fmt.Fprintln(diag, "--recording is for open")
+		return 2
+	}
 	if *take && command != "attach" {
 		fmt.Fprintln(diag, "--takeover is for attach")
 		return 2
@@ -286,6 +296,20 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if set["format"] && command != "export" {
 		fmt.Fprintln(diag, "--format is for export")
 		return 2
+	}
+	if command == "compact" {
+		if *block != "" || *request != "" || *observer {
+			fmt.Fprintln(diag, "compact accepts only --state and --json; stop the daemon first")
+			return 2
+		}
+		before, after, err := journal.Compact(*state)
+		if err != nil {
+			if errors.Is(err, journal.ErrBusy) {
+				return render(api.Error("", "conflict", "state_busy", err.Error(), "service status"), *machine, out, diag)
+			}
+			return render(api.Error("", "unreachable", "compact_failed", err.Error(), "status"), *machine, out, diag)
+		}
+		return render(api.Result("", map[string]any{"before_bytes": before, "after_bytes": after, "reclaimed_bytes": before - after}), *machine, out, diag)
 	}
 	if command == "export" {
 		if *block == "" {
@@ -320,6 +344,11 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full 16-character block ID from status or open", "status"), *machine, out, diag)
 	}
 	if command == "open" {
+		mode, lines, err := parseRecording(*recording)
+		if err != nil {
+			return render(api.Error(q.RequestID, "invalid_request", "recording", err.Error(), "help"), *machine, out, diag)
+		}
+		q.Recording, q.RecordingLines = mode, lines
 		q.Args = f.Args()
 		q.Cwd = *cwd
 		if q.Cwd == "" {
@@ -330,6 +359,9 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		if len(q.Args) == 0 {
 			return render(api.Error(q.RequestID, "invalid_request", "command", "open requires -- COMMAND ARGS", "help"), *machine, out, diag)
 		}
+	}
+	if (command == "purge" || command == "retire") && *block == "" {
+		return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full block ID from status", "status"), *machine, out, diag)
 	}
 	if command == "input" {
 		data, err := io.ReadAll(io.LimitReader(in, 64<<10+1))
@@ -404,7 +436,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			if err != nil {
 				return render(api.Error(q.RequestID, "indeterminate", "invalid_screen", "invalid screen response", "status"), false, out, diag)
 			}
-			fmt.Fprintf(out, "Block %s • %s • %dx%d • revision %d (volatile)\n", frame.Block, frame.State, frame.Frame.Cols, frame.Frame.Rows, frame.Frame.Revision)
+			fmt.Fprintf(out, "Block %s • %s • %dx%d • revision %d (%s)\n", frame.Block, frame.State, frame.Frame.Cols, frame.Frame.Rows, frame.Frame.Revision, v.Durability)
 			for _, line := range frame.Frame.ANSI {
 				fmt.Fprintln(out, strings.TrimRight(ansi.Strip(displayRow(line, frame.Frame.Cols)), " "))
 			}
@@ -700,6 +732,21 @@ func yesno(b bool) string {
 	}
 	return "no"
 }
+
+func parseRecording(v string) (string, int, error) {
+	if v == "" {
+		return journal.NormalizeRecording("", 0)
+	}
+	if strings.HasPrefix(v, journal.RecordingLines+":") {
+		n, err := strconv.Atoi(strings.TrimPrefix(v, journal.RecordingLines+":"))
+		if err != nil {
+			return "", 0, errors.New("recording lines must use lines:N with a numeric N")
+		}
+		return journal.NormalizeRecording(journal.RecordingLines, n)
+	}
+	return journal.NormalizeRecording(v, 0)
+}
+
 func readOperation(op string) bool {
 	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export"
 }
@@ -736,6 +783,17 @@ func exportCast(ctx context.Context, dir, block string, observer bool, out, diag
 			return 8
 		}
 		if firstPage {
+			switch p.Recording {
+			case journal.RecordingNone:
+				_ = aw.Marker("recording policy: PTY output disabled")
+			case journal.RecordingVisible:
+				_ = aw.Marker("recording policy: latest visible screen only")
+			case journal.RecordingLines:
+				_ = aw.Marker(fmt.Sprintf("recording policy: last %d output lines", p.RecordingLines))
+			}
+			if p.RecordingPurged {
+				_ = aw.Marker("recording before this point was purged")
+			}
 			if p.First > 1 || p.Gap {
 				_ = aw.Marker("history before this point was not retained")
 			} else if v.Class == "indeterminate" {
@@ -768,6 +826,10 @@ func exportCast(ctx context.Context, dir, block string, observer bool, out, diag
 		}
 		if v.Class == "history_gap" {
 			_ = aw.Marker("cursor outside retained history")
+			if after == 0 && p.First > 0 {
+				after = p.First - 1
+				continue
+			}
 			break
 		}
 		after = p.Next

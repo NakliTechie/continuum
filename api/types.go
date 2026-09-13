@@ -7,19 +7,21 @@ import (
 )
 
 type Request struct {
-	Cursor    string   `json:"cursor,omitempty"`
-	Terminal  string   `json:"terminal,omitempty"`
-	Operation string   `json:"operation"`
-	RequestID string   `json:"request_id,omitempty"`
-	Block     string   `json:"block_id,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	Cwd       string   `json:"cwd,omitempty"`
-	Encoding  string   `json:"encoding,omitempty"`
-	Data      string   `json:"data,omitempty"`
-	Lease     string   `json:"lease,omitempty"`
-	After     uint64   `json:"after,omitempty"`
-	Cols      int      `json:"cols,omitempty"`
-	Rows      int      `json:"rows,omitempty"`
+	Cursor         string   `json:"cursor,omitempty"`
+	Terminal       string   `json:"terminal,omitempty"`
+	Operation      string   `json:"operation"`
+	RequestID      string   `json:"request_id,omitempty"`
+	Block          string   `json:"block_id,omitempty"`
+	Args           []string `json:"args,omitempty"`
+	Cwd            string   `json:"cwd,omitempty"`
+	Encoding       string   `json:"encoding,omitempty"`
+	Data           string   `json:"data,omitempty"`
+	Lease          string   `json:"lease,omitempty"`
+	After          uint64   `json:"after,omitempty"`
+	Cols           int      `json:"cols,omitempty"`
+	Rows           int      `json:"rows,omitempty"`
+	Recording      string   `json:"recording,omitempty"`
+	RecordingLines int      `json:"recording_lines,omitempty"`
 }
 type Action struct {
 	Kind      string `json:"kind"`

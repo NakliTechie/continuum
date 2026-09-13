@@ -31,10 +31,10 @@ never mutates state.
   "schema_version": 1,
   "protocol": "continuum.local-alpha.1",
   "server": "0.1.0-alpha.2-dev",
-  "operations": ["version","status","events","screen","open","acquire","renew","release","takeover","input","resize","stop"],
+  "operations": ["version","status","events","screen","open","acquire","renew","release","takeover","input","resize","stop","purge","retire"],
   "capabilities": {
     "stable": ["pty","observers","control_lease","event_replay","control_renewal","legacy_1.3"],
-    "experimental": ["terminal_screen_v1","terminal_input_base64"]
+    "experimental": ["terminal_screen_v1","terminal_input_base64","recording_policy_v1"]
   },
   "process_restart_survival": true
 }
@@ -67,7 +67,7 @@ bump.
 
 Operations — reads (`version`, `status`, `events`, `screen`) need only a token;
 mutations (`open`, `acquire`, `renew`, `release`, `takeover`, `input`,
-`resize`, `stop`) require the operator token and a stable `request_id` that the
+`resize`, `stop`, `purge`, `retire`) require the operator token and a stable `request_id` that the
 daemon's idempotency ledger reconciles. Every response carries
 `class`/`code`/`durability`/`next_action`; `Exit`-code mapping for each class is
 in `api/types.go`.
@@ -79,9 +79,15 @@ lease), `event_replay` (bounded journal reads with typed gaps), `legacy_1.3`
 
 ## Experimental surface
 
-`terminal_screen_v1` (server-owned screens) and `terminal_input_base64`
-(byte-exact input for them) are experimental: shape and limits may change. See
-[terminal-screen-api.md](terminal-screen-api.md).
+`terminal_screen_v1` (server-owned screens), `terminal_input_base64`
+(byte-exact input for them), and `recording_policy_v1` are experimental: shape
+and limits may change. Recording policy adds optional `recording` and
+`recording_lines` fields to `open`, the corresponding block status fields, and
+the `purge`/`retire` mutations. `visible` requires `screen-v1`; `lines` requires
+`recording_lines` in `1..10000`. An omitted policy means `full`, preserving old
+clients. The offline CLI-only `compact` command is not a `/v1` operation. See
+[terminal-screen-api.md](terminal-screen-api.md) and
+[local-alpha.md](local-alpha.md).
 
 ## Not covered by this contract
 

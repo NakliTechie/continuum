@@ -36,6 +36,9 @@ func (m *Modern) retireScreen(id string, sess *pty.Session, code int) {
 	if !ok {
 		return
 	}
+	if err := m.Store.ReplaceVisibleScreen(id, frame, renderRecordedScreen(frame)); err != nil {
+		m.degraded.Store(true)
+	}
 	m.retiredMu.Lock()
 	defer m.retiredMu.Unlock()
 	m.retired[id] = screenResult{Block: id, Host: m.Store.Host, State: "exited", ExitCode: &code, Frame: frame}
@@ -53,6 +56,7 @@ func (m *Modern) screen(q api.Request) api.Response {
 	m.retiredMu.Lock()
 	frame, done := m.retired[q.Block]
 	m.retiredMu.Unlock()
+	committed := false
 	if !done {
 		e := m.s.entry(q.Block)
 		if e == nil {
@@ -62,7 +66,20 @@ func (m *Modern) screen(q api.Request) api.Response {
 			frame, done = m.retired[q.Block]
 			m.retiredMu.Unlock()
 			if !done {
-				return api.Error(q.RequestID, "conflict", "screen_unavailable", "no live or retained screen; inspect recorded events", "events")
+				var snapshot terminal.Snapshot
+				found, err := m.Store.RecordedScreen(q.Block, &snapshot)
+				if err != nil {
+					return api.Error(q.RequestID, "resource_exhausted", "store_read", "cannot read recorded screen", "status")
+				}
+				if !found {
+					return api.Error(q.RequestID, "conflict", "screen_unavailable", "no live or retained screen; inspect recorded events", "events")
+				}
+				block, err := m.Store.Block(q.Block)
+				if err != nil {
+					return api.Error(q.RequestID, "conflict", "screen_unavailable", "recorded block is unavailable", "status")
+				}
+				frame = screenResult{Block: q.Block, Host: m.Store.Host, State: block.State, Frame: snapshot}
+				committed = true
 			}
 		} else {
 			sess := m.s.entrySess(e)
@@ -76,7 +93,11 @@ func (m *Modern) screen(q api.Request) api.Response {
 	frame.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	frame.CaptureDegraded = m.degraded.Load()
 	v := api.Result(q.RequestID, frame)
-	v.Durability = "volatile"
+	if committed {
+		v.Durability = "committed"
+	} else {
+		v.Durability = "volatile"
+	}
 	if frame.Frame.Fault != "" {
 		v.Class = "indeterminate"
 		v.Code = "terminal_fault"

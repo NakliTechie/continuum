@@ -44,14 +44,16 @@ import (
 const RelayVersion = "0.6.0" // v1.2: supervisor-tree parentage + subtree kill
 
 type sessionEntry struct {
-	token     string
-	sess      *pty.Session // nil for a tmux session adopted-but-not-yet-attached
-	acp       *acp.Session // non-nil for structured sessions (sess is nil then)
-	agent     string
-	startedAt time.Time
-	pid       int
-	tmuxName  string // non-empty when the agent runs inside a tmux session
-	parent    string // protocol 1.3: parent session id (supervisor tree); "" for a root. Guarded by s.mu.
+	token          string
+	sess           *pty.Session // nil for a tmux session adopted-but-not-yet-attached
+	acp            *acp.Session // non-nil for structured sessions (sess is nil then)
+	agent          string
+	startedAt      time.Time
+	pid            int
+	tmuxName       string // non-empty when the agent runs inside a tmux session
+	parent         string // protocol 1.3: parent session id (supervisor tree); "" for a root. Guarded by s.mu.
+	recording      string
+	recordingLines int
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
@@ -596,6 +598,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 // with the read loop, and a connection can subscribe to multiple sessions).
 type conn struct {
 	terminal          *pty.TerminalOptions // modern spawn only; never set from legacy JSON
+	recording         string               // modern spawn only; empty preserves legacy full recording
+	recordingLines    int
 	srv               *Server
 	ws                *websocket.Conn
 	ctx               context.Context
@@ -895,7 +899,7 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)
-	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName, parent: parent}, id)
+	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName, parent: parent, recording: cn.recording, recordingLines: cn.recordingLines}, id)
 	_ = cn.send(protocol.Spawned{
 		Type:            protocol.TypeSpawned,
 		SessionID:       id,
