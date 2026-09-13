@@ -24,6 +24,17 @@ const (
 	systemdUnit  = "continuum.service"
 )
 
+// Kept behind two small seams so service lifecycle ordering can be proved
+// without registering or stopping the user's real launchd/systemd service.
+var (
+	runServiceCommand = func(name string, args ...string) error {
+		return exec.Command(name, args...).Run()
+	}
+	outputServiceCommand = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
+)
+
 // service installs, removes, or reports the always-on Continuum daemon.
 func service(dir, addr, origin, adoptRelay string, args []string, out, diag io.Writer) int {
 	sub := ""
@@ -149,15 +160,47 @@ func installLaunchd(bin string, argv []string, logPath string, out, diag io.Writ
 		return 0
 	}
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	_ = exec.Command("launchctl", "bootout", domain+"/"+launchdLabel).Run() // clean reload
-	if err := exec.Command("launchctl", "bootstrap", domain, plistPath).Run(); err != nil {
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
-		if err2 := exec.Command("launchctl", "load", "-w", plistPath).Run(); err2 != nil {
-			fmt.Fprintf(out, "Could not load the service automatically (%v).\nLoad it yourself with:\n  launchctl bootstrap %s %q\n", err, domain, plistPath)
-			return 0
-		}
+	if code := stopLaunchdForHandoff(domain, diag); code != 0 {
+		return code
+	}
+	if err := runServiceCommand("launchctl", "enable", domain+"/"+launchdLabel); err != nil {
+		fmt.Fprintln(diag, "could not enable the Continuum launchd agent")
+		return 5
+	}
+	if err := runServiceCommand("launchctl", "bootstrap", domain, plistPath); err != nil {
+		fmt.Fprintf(diag, "could not load the service automatically: %v\n", err)
+		return 5
 	}
 	fmt.Fprintln(out, "Loaded launchd agent", launchdLabel)
+	return 0
+}
+
+// launchd's ordinary bootout sends SIGTERM. `continuum serve` deliberately
+// interprets SIGTERM like foreground Ctrl-C and stops its work, so an update
+// first kills only the supervised daemon process. Holder processes live in
+// separate sessions and are adopted by the replacement daemon. The job is
+// disabled around the kill/bootout so KeepAlive cannot race the replacement.
+func stopLaunchdForHandoff(domain string, diag io.Writer) int {
+	target := domain + "/" + launchdLabel
+	if err := runServiceCommand("launchctl", "print", target); err != nil {
+		return 0 // no loaded job: this is a fresh install
+	}
+	// Disable first so KeepAlive cannot race the bootout by starting another
+	// old daemon after the daemon-only kill.
+	if err := runServiceCommand("launchctl", "disable", target); err != nil {
+		fmt.Fprintln(diag, "could not disable the previous Continuum launchd agent")
+		return 5
+	}
+	if err := runServiceCommand("launchctl", "kill", "SIGKILL", target); err != nil {
+		_ = runServiceCommand("launchctl", "enable", target)
+		fmt.Fprintln(diag, "could not stop only the Continuum daemon; refusing a service reload that could stop its blocks")
+		return 5
+	}
+	if err := runServiceCommand("launchctl", "bootout", target); err != nil {
+		_ = runServiceCommand("launchctl", "enable", target)
+		fmt.Fprintln(diag, "could not unload the previous Continuum launchd agent")
+		return 5
+	}
 	return 0
 }
 
@@ -179,9 +222,17 @@ func installSystemd(bin string, argv []string, out, diag io.Writer) int {
 		fmt.Fprintln(out, "(dry run: not enabled)")
 		return 0
 	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if err := exec.Command("systemctl", "--user", "enable", "--now", systemdUnit).Run(); err != nil {
-		fmt.Fprintf(out, "Could not enable the service automatically (%v).\nEnable it yourself with:\n  systemctl --user enable --now %s\n", err, systemdUnit)
+	_ = runServiceCommand("systemctl", "--user", "daemon-reload")
+	if err := runServiceCommand("systemctl", "--user", "enable", systemdUnit); err != nil {
+		fmt.Fprintf(out, "Could not enable the service automatically (%v).\nEnable it yourself with:\n  systemctl --user enable %s\n", err, systemdUnit)
+		return 0
+	}
+	// Always restart after daemon-reload. `enable --now` leaves an already
+	// active process running the old executable, which is not an upgrade.
+	// KillSignal=SIGKILL + KillMode=process replaces only the daemon; holders
+	// and their PTY children remain in the cgroup for the new daemon to adopt.
+	if err := runServiceCommand("systemctl", "--user", "restart", systemdUnit); err != nil {
+		fmt.Fprintf(out, "Could not start/restart the service automatically (%v).\nStart it yourself with:\n  systemctl --user restart %s\n", err, systemdUnit)
 		return 0
 	}
 	fmt.Fprintln(out, "Enabled systemd --user unit", systemdUnit)
@@ -195,8 +246,10 @@ func serviceUninstall(out, diag io.Writer) int {
 		home, _ := os.UserHomeDir()
 		plistPath := filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
 		domain := fmt.Sprintf("gui/%d", os.Getuid())
-		_ = exec.Command("launchctl", "bootout", domain+"/"+launchdLabel).Run()
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
+		if code := stopLaunchdForHandoff(domain, diag); code != 0 {
+			return code
+		}
+		_ = runServiceCommand("launchctl", "unload", plistPath)
 		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintln(diag, err)
 			return 5
@@ -205,12 +258,12 @@ func serviceUninstall(out, diag io.Writer) int {
 	case "linux":
 		home, _ := os.UserHomeDir()
 		unitPath := filepath.Join(home, ".config", "systemd", "user", systemdUnit)
-		_ = exec.Command("systemctl", "--user", "disable", "--now", systemdUnit).Run()
+		_ = runServiceCommand("systemctl", "--user", "disable", "--now", systemdUnit)
 		if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintln(diag, err)
 			return 5
 		}
-		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+		_ = runServiceCommand("systemctl", "--user", "daemon-reload")
 		fmt.Fprintln(out, "Removed systemd unit", systemdUnit)
 	default:
 		fmt.Fprintln(diag, "service uninstall supports macOS and Linux")
@@ -224,7 +277,7 @@ func serviceStatus(dir string, out, diag io.Writer) int {
 	switch runtime.GOOS {
 	case "darwin":
 		domain := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
-		if o, err := exec.Command("launchctl", "print", domain).CombinedOutput(); err != nil {
+		if o, err := outputServiceCommand("launchctl", "print", domain); err != nil {
 			fmt.Fprintln(out, "Service not loaded. Install it with `continuum service install`.")
 		} else {
 			fmt.Fprintln(out, "launchd agent", launchdLabel, "is loaded.")
@@ -235,7 +288,7 @@ func serviceStatus(dir string, out, diag io.Writer) int {
 			}
 		}
 	case "linux":
-		o, _ := exec.Command("systemctl", "--user", "is-active", systemdUnit).CombinedOutput()
+		o, _ := outputServiceCommand("systemctl", "--user", "is-active", systemdUnit)
 		fmt.Fprintf(out, "systemd unit %s: %s", systemdUnit, string(o))
 	default:
 		fmt.Fprintln(diag, "service status supports macOS and Linux")
@@ -283,6 +336,7 @@ func launchdPlist(bin string, argv []string, logPath, path string) string {
 %s  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>AbandonProcessGroup</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
@@ -313,6 +367,7 @@ RestartSec=2
 # The daemon's holder subprocesses keep PTY blocks alive across a restart; they
 # live in this unit's cgroup, so only the main process may be signalled on stop.
 KillMode=process
+KillSignal=SIGKILL
 
 [Install]
 WantedBy=default.target
@@ -392,8 +447,8 @@ func stopLegacyRelayService(out, diag io.Writer) int {
 			return 0
 		}
 		domain := fmt.Sprintf("gui/%d", os.Getuid())
-		_ = exec.Command("launchctl", "bootout", domain+"/com.naklitechie.menagerie-relay").Run()
-		if exec.Command("launchctl", "print", domain+"/com.naklitechie.menagerie-relay").Run() == nil {
+		_ = runServiceCommand("launchctl", "bootout", domain+"/com.naklitechie.menagerie-relay")
+		if runServiceCommand("launchctl", "print", domain+"/com.naklitechie.menagerie-relay") == nil {
 			fmt.Fprintln(diag, "could not stop the menagerie-relay agent; aborting cutover (it may still hold the port). Stop it yourself and retry.")
 			return 5
 		}
@@ -413,8 +468,8 @@ func stopLegacyRelayService(out, diag io.Writer) int {
 			fmt.Fprintf(out, "(dry run) would stop and back up %s\n", unit)
 			return 0
 		}
-		_ = exec.Command("systemctl", "--user", "disable", "--now", "menagerie-relay.service").Run()
-		if o, _ := exec.Command("systemctl", "--user", "is-active", "menagerie-relay.service").CombinedOutput(); strings.TrimSpace(string(o)) == "active" {
+		_ = runServiceCommand("systemctl", "--user", "disable", "--now", "menagerie-relay.service")
+		if o, _ := outputServiceCommand("systemctl", "--user", "is-active", "menagerie-relay.service"); strings.TrimSpace(string(o)) == "active" {
 			fmt.Fprintln(diag, "could not stop the menagerie-relay unit; aborting cutover (it may still hold the port). Stop it yourself and retry.")
 			return 5
 		}
@@ -423,7 +478,7 @@ func stopLegacyRelayService(out, diag io.Writer) int {
 			fmt.Fprintf(diag, "could not back up the relay unit: %v\n", err)
 			return 5
 		}
-		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+		_ = runServiceCommand("systemctl", "--user", "daemon-reload")
 		fmt.Fprintf(out, "Stopped and backed up the menagerie-relay unit to %s\n", bak)
 	}
 	return 0

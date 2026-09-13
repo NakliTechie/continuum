@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy]. No live endpoint reuse."""
+"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy|upgrade]. No live endpoint reuse."""
 import argparse
 import json
 import os
@@ -37,7 +37,7 @@ def stray_go_dirs():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['doctor', 'verify'])
-    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy'])
+    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy', 'upgrade'])
     opts = p.parse_args()
     missing = [name for name in ['go', 'git', 'python3'] if not shutil.which(name)]
     if missing:
@@ -58,7 +58,7 @@ def main():
             report['stray_go_dirs'] = stray
         print(json.dumps(report))
         return
-    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy']
+    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy', 'upgrade']
     with tempfile.TemporaryDirectory(prefix='continuum-verify-') as directory:
         temp = Path(directory)
         home, tmp = temp / 'home', temp / 'tmp'
@@ -71,7 +71,10 @@ def main():
         env = dict(os.environ, **go_env, HOME=str(home), TMPDIR=str(tmp))
         if 'core' in features:
             pkgs = packages()
-            run(['go', 'test', '-race', '-count=1', '-timeout=120s'] + pkgs, env=env)
+            # internal/server is intentionally load-heavy and takes ~125s on
+            # the reference macOS host. Keep a real deadline without making
+            # normal scheduler variance fail the whole repository gate.
+            run(['go', 'test', '-race', '-count=1', '-timeout=180s'] + pkgs, env=env)
             run(['go', 'vet'] + pkgs, env=env)
             if shutil.which('govulncheck'):
                 run(['govulncheck'] + pkgs, env=env)
@@ -93,6 +96,10 @@ def main():
             env = dict(env, CONTINUUM_TEST_RELAY=str(relay), CONTINUUM_TEST_ACP=str(fake))
             run(['go', 'test', '-race', '-tags=legacyintegration', '-count=1',
                  '-timeout=90s', './compat'], env=env)
+        if 'upgrade' in features:
+            binary = temp / 'continuum-upgrade-candidate'
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
+            run(['python3', 'scripts/check_upgrade.py', '--binary', str(binary)], env=env)
     print(json.dumps({'class': 'ok', 'check': 'verify', 'features': features, 'checkout': str(ROOT)}))
 
 if __name__ == '__main__':

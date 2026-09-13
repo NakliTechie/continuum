@@ -53,7 +53,7 @@ Point Menagerie's Add-relay form at the `ws://` address `serve` prints, using `o
 
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI journey, legacy compatibility). Not yet done: structured-session (ACP) restart survival, native Linux and real-provider validation.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy and schema-upgrade compatibility). Not yet done: structured-session (ACP) restart survival, native Linux and real-provider validation.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions

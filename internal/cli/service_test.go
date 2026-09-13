@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +19,7 @@ func TestLaunchdPlistEscapesAndCarriesArgs(t *testing.T) {
 		"<string>/home/a&amp;b/&lt;state&gt;</string>",
 		"<string>127.0.0.1:58750</string>",
 		"<key>KeepAlive</key><true/>",
+		"<key>AbandonProcessGroup</key><true/>",
 	} {
 		if !strings.Contains(plist, want) {
 			t.Fatalf("plist missing %q:\n%s", want, plist)
@@ -52,6 +54,80 @@ func TestSystemdUnitQuotesArgs(t *testing.T) {
 	}
 	if !strings.Contains(unit, "KillMode=process") {
 		t.Fatal("missing KillMode=process — holders in the cgroup would be killed on stop")
+	}
+	if !strings.Contains(unit, "KillSignal=SIGKILL") {
+		t.Fatal("missing KillSignal=SIGKILL — graceful daemon shutdown stops holder-owned blocks")
+	}
+}
+
+func TestLaunchdHandoffKillsOnlyTheDaemonBeforeBootout(t *testing.T) {
+	old := runServiceCommand
+	t.Cleanup(func() { runServiceCommand = old })
+	var calls []string
+	runServiceCommand = func(name string, args ...string) error {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		return nil
+	}
+	var diag strings.Builder
+	if code := stopLaunchdForHandoff("gui/501", &diag); code != 0 {
+		t.Fatalf("handoff failed: %d %q", code, diag.String())
+	}
+	want := []string{
+		"launchctl print gui/501/com.naklitechie.continuum",
+		"launchctl disable gui/501/com.naklitechie.continuum",
+		"launchctl kill SIGKILL gui/501/com.naklitechie.continuum",
+		"launchctl bootout gui/501/com.naklitechie.continuum",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("unsafe launchd handoff order:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestLaunchdHandoffRefusesTerminatingFallback(t *testing.T) {
+	old := runServiceCommand
+	t.Cleanup(func() { runServiceCommand = old })
+	var calls []string
+	runServiceCommand = func(name string, args ...string) error {
+		call := strings.Join(append([]string{name}, args...), " ")
+		calls = append(calls, call)
+		if strings.Contains(call, " kill SIGKILL ") {
+			return errors.New("denied")
+		}
+		return nil
+	}
+	var diag strings.Builder
+	if code := stopLaunchdForHandoff("gui/501", &diag); code != 5 {
+		t.Fatalf("unsafe handoff did not fail closed: %d", code)
+	}
+	joined := strings.Join(calls, "\n")
+	if strings.Contains(joined, "bootout") {
+		t.Fatalf("SIGKILL failure fell back to block-stopping bootout:\n%s", joined)
+	}
+	if !strings.Contains(joined, "launchctl enable gui/501/com.naklitechie.continuum") {
+		t.Fatalf("failed handoff did not restore launchd enablement:\n%s", joined)
+	}
+}
+
+func TestSystemdInstallReloadsAndRestartsAnExistingUnit(t *testing.T) {
+	old := runServiceCommand
+	t.Cleanup(func() { runServiceCommand = old })
+	var calls []string
+	runServiceCommand = func(name string, args ...string) error {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		return nil
+	}
+	t.Setenv("HOME", t.TempDir())
+	var out, diag strings.Builder
+	if code := installSystemd("/opt/continuum", []string{"serve", "--state", "/tmp/state", "--listen", "127.0.0.1:58750"}, &out, &diag); code != 0 {
+		t.Fatalf("install failed: %d %q", code, diag.String())
+	}
+	want := []string{
+		"systemctl --user daemon-reload",
+		"systemctl --user enable continuum.service",
+		"systemctl --user restart continuum.service",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("systemd install did not reload the running binary:\n%s", strings.Join(calls, "\n"))
 	}
 }
 

@@ -348,7 +348,12 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		if err != nil {
 			return render(api.Error(q.RequestID, "invalid_request", "recording", err.Error(), "help"), *machine, out, diag)
 		}
-		q.Recording, q.RecordingLines = mode, lines
+		// Empty is the contract's legacy spelling of full. Keep it off the wire
+		// for default/explicit full so this client remains usable with strict
+		// schema-1 daemons that reject unknown JSON fields.
+		if mode != journal.RecordingFull {
+			q.Recording, q.RecordingLines = mode, lines
+		}
 		q.Args = f.Args()
 		q.Cwd = *cwd
 		if q.Cwd == "" {
@@ -389,6 +394,30 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// Older /v1 daemons do not understand recording fields: the pinned daemon
+	// rejects them, while any permissive decoder could silently ignore none,
+	// visible or lines:N and retain output the operator asked not to retain.
+	// Establish the experimental capability before the open mutation so every
+	// mixed-version failure happens closed.
+	if command == "open" && q.Recording != "" {
+		v := call(ctx, *state, *observer, api.Request{Operation: "status"})
+		if v.Class != "ok" {
+			return render(v, *machine, out, diag)
+		}
+		var advertised struct {
+			Capabilities []string `json:"capabilities"`
+		}
+		if err := json.Unmarshal(v.Result, &advertised); err != nil {
+			return render(api.Error(q.RequestID, "indeterminate", "invalid_contract", "cannot read daemon capabilities; recording policy was not applied", "contract"), *machine, out, diag)
+		}
+		supported := false
+		for _, capability := range advertised.Capabilities {
+			supported = supported || capability == "recording_policy_v1"
+		}
+		if !supported {
+			return render(api.Error(q.RequestID, "unsupported", "recording_policy", "daemon lacks recording_policy_v1; upgrade it before opening with a non-full recording policy", "contract"), *machine, out, diag)
+		}
+	}
 	var sanitizer textFilter // --text: one filter across every page, so split escapes stay caught
 	warned := false
 	degradedClass := "" // the first degraded envelope's class decides the exit code
