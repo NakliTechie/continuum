@@ -70,17 +70,35 @@ func TestAuditKillDescendants(t *testing.T) {
 	var pid int
 	select {
 	case pid = <-pidch:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("no child pid")
 	}
 	defer syscall.Kill(pid, syscall.SIGKILL)
 	s.Kill()
+	// The exit callback fires once Run reaps the leader and its bounded group
+	// drain completes. Wait for it, but do not make its arrival the pass/fail
+	// signal: SIGKILL delivery and orphan reaping (the descendant reparents to
+	// init/launchd when its shell dies) are asynchronous and stretch under
+	// concurrent CPU load.
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
-		t.Errorf("descendant %d remains alive after Kill", pid)
+	// Poll until the descendant is actually gone (ESRCH) rather than checking
+	// once. A single-shot probe races the kernel's asynchronous reaping and
+	// produced false RED results in the whole-project gate under load; a
+	// generous bounded loop removes the timing dependency without hanging a
+	// genuinely stuck reap.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			break // ESRCH: the descendant has exited and been reaped
+		}
+		if !time.Now().Before(deadline) {
+			t.Errorf("descendant %d remains alive after Kill", pid)
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
