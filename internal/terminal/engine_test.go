@@ -56,9 +56,44 @@ func TestSplitSequencesAndUTF8(t *testing.T) {
 		t.Fatalf("split mismatch: %+v / %+v", a, b)
 	}
 }
+
+func TestSnapshotEpochIdentifiesAnEngineLifetime(t *testing.T) {
+	a := newEngine(t, 20, 4)
+	b := newEngine(t, 20, 4)
+	first := a.Snapshot()
+	feed(t, a, "changed")
+	second := a.Snapshot()
+	if first.Epoch == "" || first.Epoch != second.Epoch || first.Revision == second.Revision {
+		t.Fatalf("one engine lifetime: first=%+v second=%+v", first, second)
+	}
+	if first.Epoch == b.Snapshot().Epoch {
+		t.Fatal("independent engines shared an epoch")
+	}
+}
+
+func TestComplexGraphemesSurviveFeedBoundaries(t *testing.T) {
+	e := newEngine(t, 40, 4)
+	want := "e\u0301|界|👩🏽‍💻|🏳️‍🌈"
+	for _, b := range []byte(want) {
+		feed(t, e, string([]byte{b}))
+	}
+	feed(t, e, "\r\n")
+	if got := strings.TrimSpace(e.Snapshot().Lines[0]); got != want {
+		t.Fatalf("split graphemes changed: got %q want %q", got, want)
+	}
+
+	// A final printable cell is published after the bounded hold even if no
+	// later control arrives to close its grapheme.
+	feed(t, e, "tail")
+	time.Sleep(GraphemeHoldCeiling + 10*time.Millisecond)
+	if got := strings.Join(e.Snapshot().Lines, "\n"); !strings.Contains(got, "tail") {
+		t.Fatalf("trailing grapheme stayed pending: %q", got)
+	}
+}
 func TestAlternateRestoreResizeAndScrollback(t *testing.T) {
 	e := newEngine(t, 20, 4)
 	feed(t, e, "primary\x1b[?1049hALT")
+	time.Sleep(GraphemeHoldCeiling + 10*time.Millisecond)
 	s := e.Snapshot()
 	if !s.Alternate || !strings.HasPrefix(s.Lines[0], "ALT") {
 		t.Fatal(s)
@@ -156,6 +191,7 @@ func TestSnapshotIsCachedPerRevision(t *testing.T) {
 	if _, err := e.Feed([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(GraphemeHoldCeiling + 10*time.Millisecond)
 	a, b := e.Snapshot(), e.Snapshot()
 	if a.Revision != b.Revision || a.Lines[0] != b.Lines[0] || !strings.HasPrefix(a.Lines[0], "hello") {
 		t.Fatalf("idle snapshots differ: %+v %+v", a.Lines, b.Lines)
@@ -163,6 +199,7 @@ func TestSnapshotIsCachedPerRevision(t *testing.T) {
 	if _, err := e.Feed([]byte(" world")); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(GraphemeHoldCeiling + 10*time.Millisecond)
 	c := e.Snapshot()
 	if c.Revision == b.Revision || !strings.HasPrefix(c.Lines[0], "hello world") {
 		t.Fatalf("write did not invalidate the cached frame: rev %d vs %d %q", c.Revision, b.Revision, c.Lines[0])

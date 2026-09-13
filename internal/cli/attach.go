@@ -261,6 +261,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 	defer renew.Stop()
 	renewID, renewMisses := "", 0
 	lastRevision := uint64(0)
+	lastEpoch := ""
 	haveFrame := false
 	disconnected := false
 	tooSmall := false
@@ -398,6 +399,9 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 			if nextView.Host != view.Host {
 				return fail(api.Error("", "conflict", "host_changed", "state directory now names a different host", "status"))
 			}
+			if haveFrame && lastEpoch != "" && nextView.Frame.Epoch != "" && nextView.Frame.Epoch != lastEpoch {
+				return fail(api.Error("", "conflict", "screen_reset", "terminal screen was rebuilt after a daemon restart; reconnect explicitly", "status"))
+			}
 			if haveFrame && nextView.Frame.Revision < lastRevision {
 				return fail(api.Error("", "conflict", "screen_reset", "screen revision moved backwards; reconnect explicitly", "status"))
 			}
@@ -407,6 +411,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 				disconnected = false
 				haveFrame = true
 				lastRevision = view.Frame.Revision
+				lastEpoch = view.Frame.Epoch
 				if err := paint(footer()); err != nil {
 					if ctx.Err() != nil {
 						return 0

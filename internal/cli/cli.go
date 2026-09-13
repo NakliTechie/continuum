@@ -70,7 +70,7 @@ Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
 Observation: --observer uses the read-only observer credential.
 Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into server-owned screens.
 Attach: --observer is read-only; --takeover explicitly replaces a controller.
-Keyboard only; complex Unicode and advanced TUI compatibility are experimental.
+Keyboard plus common combining/CJK/emoji-ZWJ output is covered; mouse, IME and advanced TUI compatibility remain experimental.
 
 This alpha recovers records and running PTY processes after daemon restart (structured agent sessions do not survive yet).
 Menagerie can use the same daemon's legacy WebSocket endpoint with operator.token.

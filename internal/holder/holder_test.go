@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,12 @@ func TestChildSurvivesDetachAndResumesContiguously(t *testing.T) {
 	}
 	if b.Gap <= 0 {
 		t.Fatalf("downtime gap not reported: %d", b.Gap)
+	}
+	if b.Replay != committed {
+		t.Fatalf("retained replay=%d, want committed prefix %d", b.Replay, committed)
+	}
+	if _, err := io.CopyN(io.Discard, b.Output, int64(b.Replay)); err != nil {
+		t.Fatal(err)
 	}
 	resumed := readOutputUntil(t, b, "tick", 5*time.Second)
 	nums := ticks(first + resumed)

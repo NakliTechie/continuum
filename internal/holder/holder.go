@@ -180,7 +180,8 @@ func Launch(state, exe string, spec Spec) (*Attached, error) {
 type Attached struct {
 	Hello  Hello
 	Ptmx   *os.File  // input and resize only; never read
-	Output io.Reader // decoded output stream
+	Output io.Reader // decoded output stream, including Replay retained bytes
+	Replay int       // leading Output bytes already committed by the daemon
 	Gap    int       // bytes produced before this attach (unobserved downtime)
 	conn   net.Conn
 	exit   chan int
@@ -230,14 +231,20 @@ func Adopt(socket string, resume int) (*Attached, error) {
 		conn.Close()
 		return nil, errors.New("holder sent no terminal descriptor")
 	}
-	if resume < hello.RingStart {
-		resume = hello.RingStart // the earliest the holder can still supply
-	}
 	if resume > hello.Produced {
 		resume = hello.Produced
 	}
+	committed := resume
+	if committed < hello.RingStart {
+		committed = hello.RingStart // the earliest the holder can still supply
+	}
+	// Start at the retained ring boundary, not merely at the journal offset.
+	// A restarted server-owned terminal needs the bounded prefix to rebuild its
+	// volatile screen. Attached.Replay tells the session how much of that prefix
+	// must feed only the screen, never be journaled or captured a second time.
+	streamStart := hello.RingStart
 	var off [8]byte
-	binary.BigEndian.PutUint64(off[:], uint64(resume))
+	binary.BigEndian.PutUint64(off[:], uint64(streamStart))
 	if err := writeFrame(conn, frameResume, off[:]); err != nil {
 		closeFD(fd)
 		conn.Close()
@@ -245,7 +252,7 @@ func Adopt(socket string, resume int) (*Attached, error) {
 	}
 	_ = uc.SetDeadline(time.Time{})
 	pr, pw := io.Pipe()
-	a := &Attached{Hello: hello, Ptmx: os.NewFile(uintptr(fd), "ptmx"), Output: pr, Gap: hello.Produced - resume, conn: conn, exit: make(chan int, 1)}
+	a := &Attached{Hello: hello, Ptmx: os.NewFile(uintptr(fd), "ptmx"), Output: pr, Replay: committed - streamStart, Gap: hello.Produced - committed, conn: conn, exit: make(chan int, 1)}
 	go a.decode(rd, pw)
 	return a, nil
 }

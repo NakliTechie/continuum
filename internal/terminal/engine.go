@@ -3,6 +3,8 @@
 package terminal
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -58,6 +60,7 @@ type Modes struct {
 // rows are separate to avoid inheriting application margins or cursor modes.
 type Snapshot struct {
 	Engine     string   `json:"engine"`
+	Epoch      string   `json:"epoch"`
 	Revision   uint64   `json:"revision"`
 	Cols       int      `json:"cols"`
 	Rows       int      `json:"rows"`
@@ -73,6 +76,7 @@ type Snapshot struct {
 type emulator struct {
 	mu       sync.Mutex
 	vt       *vt.Emulator
+	epoch    string
 	revision uint64
 	// cached is the last frame built, reused while the revision holds: a
 	// viewer polling an idle screen must not rebuild 19,200 cells under the
@@ -89,6 +93,8 @@ type emulator struct {
 	modes         Modes
 	modeSet       map[ansi.Mode]bool
 	guard         sequenceGuard
+	pending       []byte
+	pendingAt     time.Time
 	fault         error
 	closed        bool
 	input         *io.PipeWriter
@@ -105,7 +111,11 @@ func New(cols, rows int) (Engine, error) {
 	if !ValidSize(cols, rows) {
 		return nil, fmt.Errorf("%w: size must fit 240 columns, 100 rows and 19200 cells", ErrLimit)
 	}
-	e := &emulator{vt: vt.NewEmulator(cols, rows), cursor: Cursor{Visible: true, Blink: true}, modeSet: map[ansi.Mode]bool{}, done: make(chan struct{})}
+	var epochBytes [16]byte
+	if _, err := rand.Read(epochBytes[:]); err != nil {
+		return nil, fmt.Errorf("terminal epoch: %w", err)
+	}
+	e := &emulator{vt: vt.NewEmulator(cols, rows), epoch: hex.EncodeToString(epochBytes[:]), cursor: Cursor{Visible: true, Blink: true}, modeSet: map[ansi.Mode]bool{}, done: make(chan struct{})}
 	e.input = e.vt.InputPipe().(*io.PipeWriter)
 	e.vt.SetScrollbackSize(ScrollbackLines)
 	// Upstream uses a DEC-private status report for ANSI DSR 5. Reply with the
@@ -146,6 +156,13 @@ func New(cols, rows int) (Engine, error) {
 // on the previous frame: long enough for a real TUI's redraw, short enough
 // that an application which sets 2026 and stalls does not freeze its viewers.
 const SyncHoldCeiling = 150 * time.Millisecond
+
+// GraphemeHoldCeiling lets adjacent PTY reads form one Unicode grapheme. A PTY
+// read boundary has no text semantics, but the pinned emulator finalizes cells
+// per Write. Holding only the trailing printable cluster keeps the added latency
+// below one interactive frame while controls, queries and completed prefixes
+// continue immediately.
+const GraphemeHoldCeiling = 30 * time.Millisecond
 
 // beginHold publishes the current screen for the duration of a synchronized
 // update. It runs inside a Feed under e.mu (the mode callback fires from
@@ -216,6 +233,33 @@ func (e *emulator) Feed(b []byte) ([]byte, error) {
 		e.revision++
 		return nil, err
 	}
+	if len(e.pending) > 0 && time.Since(e.pendingAt) >= GraphemeHoldCeiling {
+		if err := e.flushPendingLocked(); err != nil {
+			return nil, err
+		}
+	}
+	b = append(e.pending, b...)
+	e.pending = nil
+	// Keep the final printable grapheme for the next read. If another grapheme
+	// or any control follows, the earlier cluster is complete and is written.
+	for rest, offset := b, 0; len(rest) > 0; {
+		cluster, width := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
+		if len(cluster) == 0 {
+			break
+		}
+		offset += len(cluster)
+		rest = rest[len(cluster):]
+		if len(rest) == 0 && width > 0 && e.guard.endsInText() {
+			e.pending = append(e.pending[:0], cluster...)
+			e.pendingAt = time.Now()
+			b = b[:offset-len(cluster)]
+		}
+	}
+	if len(e.pending) > 256 {
+		e.fault = fmt.Errorf("%w: grapheme", ErrLimit)
+		e.revision++
+		return nil, e.fault
+	}
 	// The dependency flushes graphemes per Write. Bound each potential cell's
 	// retained content independently of chunk length, including combining marks.
 	for rest := b; len(rest) > 0; {
@@ -239,6 +283,21 @@ func (e *emulator) Feed(b []byte) ([]byte, error) {
 	}
 	return e.takeReplies()
 }
+
+func (e *emulator) flushPendingLocked() error {
+	if len(e.pending) == 0 {
+		return nil
+	}
+	pending := e.pending
+	e.pending = nil
+	if _, err := e.vt.Write(pending); err != nil {
+		e.fault = err
+		return err
+	}
+	e.revision++
+	return nil
+}
+
 func (e *emulator) Resize(cols, rows int) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -251,6 +310,9 @@ func (e *emulator) Resize(cols, rows int) ([]byte, error) {
 	if !ValidSize(cols, rows) {
 		return nil, fmt.Errorf("%w: resize", ErrLimit)
 	}
+	if err := e.flushPendingLocked(); err != nil {
+		return nil, err
+	}
 	if cols == e.vt.Width() && rows == e.vt.Height() {
 		return nil, nil
 	}
@@ -261,6 +323,9 @@ func (e *emulator) Resize(cols, rows int) ([]byte, error) {
 func (e *emulator) Snapshot() Snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if len(e.pending) > 0 && time.Since(e.pendingAt) >= GraphemeHoldCeiling {
+		_ = e.flushPendingLocked()
+	}
 	if e.held != nil {
 		if time.Now().Before(e.holdUntil) {
 			return copyFrame(e.held, e.fault)
@@ -299,7 +364,7 @@ func copyFrame(f *Snapshot, fault error) Snapshot {
 
 // buildLocked renders the visible screen; the caller holds e.mu.
 func (e *emulator) buildLocked() Snapshot {
-	s := Snapshot{Engine: Name, Revision: e.revision, Cols: e.vt.Width(), Rows: e.vt.Height(), Alternate: e.vt.IsAltScreen(), Cursor: e.cursor, Modes: e.modes, Scrollback: e.vt.ScrollbackLen()}
+	s := Snapshot{Engine: Name, Epoch: e.epoch, Revision: e.revision, Cols: e.vt.Width(), Rows: e.vt.Height(), Alternate: e.vt.IsAltScreen(), Cursor: e.cursor, Modes: e.modes, Scrollback: e.vt.ScrollbackLen()}
 	pos := e.vt.CursorPosition()
 	s.Cursor.X = pos.X
 	s.Cursor.Y = pos.Y
@@ -343,10 +408,15 @@ func (e *emulator) Close() error {
 	if e.closed {
 		return nil
 	}
+	flushErr := e.flushPendingLocked()
 	e.closed = true
 	_ = e.input.Close()
 	<-e.done
-	return e.vt.Close()
+	closeErr := e.vt.Close()
+	if flushErr != nil {
+		return flushErr
+	}
+	return closeErr
 }
 
 // sequenceGuard uses the SAME pinned parser transitions as the emulator.
@@ -356,6 +426,11 @@ func (e *emulator) Close() error {
 type sequenceGuard struct {
 	parser         *ansi.Parser
 	length, number int
+	lastAction     parser.Action
+}
+
+func (g *sequenceGuard) endsInText() bool {
+	return g.lastAction == parser.PrintAction || g.parser != nil && g.parser.State() == parser.Utf8State
 }
 
 func (g *sequenceGuard) check(b []byte) error {
@@ -367,6 +442,7 @@ func (g *sequenceGuard) check(b []byte) error {
 	for _, c := range b {
 		before := g.parser.State()
 		action := g.parser.Advance(c)
+		g.lastAction = action
 		after := g.parser.State()
 		if inSequence(before) {
 			g.length++

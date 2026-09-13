@@ -42,6 +42,7 @@ type attachFixture struct {
 	hangScreen   bool
 	controlled   bool
 	color        bool
+	screenEpoch  string
 	capabilities []string
 }
 
@@ -49,8 +50,8 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 	t.Helper()
 	// This fixture emulates a capable outer terminal, independent of the test runner.
 	t.Setenv("TERM", "xterm-256color")
-	f := &attachFixture{capabilities: []string{"terminal_screen_v1", "terminal_input_base64", "control_renewal"}}
-	frame := terminal.Snapshot{Engine: terminal.Name, Cols: 80, Rows: 23, Revision: 1, Cursor: terminal.Cursor{Visible: true, X: 5, Y: 1}, Lines: make([]string, 23), ANSI: make([]string, 23)}
+	f := &attachFixture{screenEpoch: "epoch-one", capabilities: []string{"terminal_screen_v1", "terminal_input_base64", "control_renewal"}}
+	frame := terminal.Snapshot{Engine: terminal.Name, Epoch: f.screenEpoch, Cols: 80, Rows: 23, Revision: 1, Cursor: terminal.Cursor{Visible: true, X: 5, Y: 1}, Lines: make([]string, 23), ANSI: make([]string, 23)}
 	frame.Lines[0] = "ATTACH_READY"
 	frame.ANSI[0] = "ATTACH_READY"
 	h := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +67,7 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 		}
 		hang := f.hangScreen && f.screens > 1 && q.Operation == "screen"
 		capabilities := append([]string(nil), f.capabilities...)
-		controlled, color := f.controlled, f.color
+		controlled, color, screenEpoch := f.controlled, f.color, f.screenEpoch
 		fail := f.failInput
 		f.mu.Unlock()
 		if hang {
@@ -88,6 +89,7 @@ func newAttachFixture(t *testing.T) (string, *attachFixture) {
 			result = api.Result("", map[string]any{"capabilities": capabilities})
 		case "screen":
 			current := frame
+			current.Epoch = screenEpoch
 			if color {
 				current.ANSI = append([]string(nil), frame.ANSI...)
 				current.ANSI[0] = "\x1b[31mATTACH_READY\x1b[0m"
@@ -329,6 +331,19 @@ func TestAttachPTYDetachCancelsPendingRead(t *testing.T) {
 	s.finished(t, 0)
 	if time.Since(start) > time.Second {
 		t.Fatal("detach waited for network timeout")
+	}
+}
+
+func TestAttachStopsAtScreenEpochBoundary(t *testing.T) {
+	dir, f := newAttachFixture(t)
+	s := startAttach(t, dir, true)
+	waitFor(t, "first screen epoch", func() bool { return strings.Contains(s.output.String(), "ATTACH_READY") })
+	f.mu.Lock()
+	f.screenEpoch = "epoch-two"
+	f.mu.Unlock()
+	s.finished(t, 6)
+	if !strings.Contains(s.diag.String(), "rebuilt after a daemon restart") {
+		t.Fatal(s.diag.String())
 	}
 }
 func TestAttachRejectsPipesBeforeCallingDaemon(t *testing.T) {

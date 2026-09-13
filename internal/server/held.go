@@ -33,7 +33,7 @@ func (s *Server) startHeld(id, agent string, cmd *exec.Cmd, opts *pty.TerminalOp
 	if perr != nil {
 		started = time.Now()
 	}
-	sess, err := pty.Held(id, agent, a.Ptmx, a.Hello.PID, started, a.Output, a.Wait, opts, s.cfg.CaptureDir)
+	sess, err := pty.Held(id, agent, a.Ptmx, a.Hello.PID, started, a.Output, a.Wait, a.Replay, opts, s.cfg.CaptureDir)
 	if err != nil {
 		a.Close()
 		a.Ptmx.Close()
@@ -110,7 +110,7 @@ func (s *Server) adoptHeld(r holder.Record) {
 	if perr != nil {
 		started = time.Now()
 	}
-	sess, err := pty.Held(r.Block, a.Hello.Agent, a.Ptmx, a.Hello.PID, started, a.Output, a.Wait, opts, s.cfg.CaptureDir)
+	sess, err := pty.Held(r.Block, a.Hello.Agent, a.Ptmx, a.Hello.PID, started, a.Output, a.Wait, a.Replay, opts, s.cfg.CaptureDir)
 	if err != nil {
 		a.Close()
 		a.Ptmx.Close()

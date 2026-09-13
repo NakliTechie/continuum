@@ -44,6 +44,7 @@ type Session struct {
 	readFn func([]byte) (int, error) // output source: the PTY, or a holder's stream
 	wait   func() int                // reaps the leader, or reads the holder's exit report
 	cap    *os.File                  // append-only capture: ~/.menagerie/sessions/<id>.pty
+	replay int                       // leading holder bytes feed term only; already recorded
 
 	mu     sync.Mutex
 	seq    int
@@ -116,7 +117,7 @@ func start(id, agent string, cmd *exec.Cmd, opts *TerminalOptions, capture ...*s
 // holder's, so wait reads the holder's exit report instead of reaping. gap is
 // output the holder drained while no daemon was attached; it seeds the replay
 // tail and, for a server-owned screen, the rebuilt frame.
-func Held(id, agent string, ptmx *os.File, pid int, startedAt time.Time, output io.Reader, wait func() int, opts *TerminalOptions, capture ...*string) (*Session, error) {
+func Held(id, agent string, ptmx *os.File, pid int, startedAt time.Time, output io.Reader, wait func() int, replay int, opts *TerminalOptions, capture ...*string) (*Session, error) {
 	var engine terminal.Engine
 	if opts != nil {
 		var err error
@@ -124,7 +125,7 @@ func Held(id, agent string, ptmx *os.File, pid int, startedAt time.Time, output 
 			return nil, err
 		}
 	}
-	s := &Session{term: engine, ID: id, Agent: agent, StartedAt: startedAt, PID: pid, ptmx: ptmx, wait: wait}
+	s := &Session{term: engine, ID: id, Agent: agent, StartedAt: startedAt, PID: pid, ptmx: ptmx, wait: wait, replay: replay}
 	// The daemon never reads the master (the holder is the sole reader); output
 	// arrives over the holder stream and is journaled here as it always was.
 	s.readFn = func(b []byte) (int, error) { return output.Read(b) }
@@ -155,17 +156,6 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.mu.Lock()
-			seq := s.seq
-			s.seq++
-			s.tail = append(s.tail, chunk...)
-			if len(s.tail) > maxTail {
-				s.tail = s.tail[len(s.tail)-maxTail:]
-			}
-			s.mu.Unlock()
-			if s.cap != nil {
-				_, _ = s.cap.Write(chunk)
-			}
 			if s.term != nil {
 				s.termMu.Lock()
 				if s.termFault == "" {
@@ -179,7 +169,29 @@ func (s *Session) Run(onData func(seq int, b []byte), onExit func(code int)) {
 				}
 				s.termMu.Unlock()
 			}
-			onData(seq, chunk)
+			// A holder adoption can prepend retained output so a new volatile
+			// terminal engine reconstructs its screen. Drop the committed prefix
+			// only after feeding the engine: events and capture remain exactly-once.
+			recorded := chunk
+			if s.replay > 0 {
+				skip := min(s.replay, len(recorded))
+				s.replay -= skip
+				recorded = recorded[skip:]
+			}
+			if len(recorded) > 0 {
+				s.mu.Lock()
+				seq := s.seq
+				s.seq++
+				s.tail = append(s.tail, recorded...)
+				if len(s.tail) > maxTail {
+					s.tail = s.tail[len(s.tail)-maxTail:]
+				}
+				s.mu.Unlock()
+				if s.cap != nil {
+					_, _ = s.cap.Write(recorded)
+				}
+				onData(seq, recorded)
+			}
 		}
 		if err != nil {
 			break // EOF when the child exits, or PTY closed

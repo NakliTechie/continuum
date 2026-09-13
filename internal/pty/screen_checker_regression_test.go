@@ -159,3 +159,35 @@ func TestCheckerPTYReplyDeadlineFaultDoesNotStopRawCapture(t *testing.T) {
 		t.Fatalf("raw post-fault output lost: %q", raw.String())
 	}
 }
+
+// A restarted daemon replays the holder's retained ring into a fresh screen
+// engine. Bytes already committed before the crash must rebuild the screen but
+// must not be emitted to the journal callback or capture file a second time.
+func TestHeldTerminalReplayRebuildsWithoutRedelivery(t *testing.T) {
+	ptmx, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := ""
+	output := strings.NewReader("BEFORE\r\nAFTER")
+	s, err := Held("replay", "custom", ptmx, 123, time.Now(), output, func() int { return 0 }, len("BEFORE\r\n"), &TerminalOptions{Cols: 20, Rows: 4}, &disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered bytes.Buffer
+	done := make(chan struct{})
+	s.Run(func(_ int, b []byte) { delivered.Write(b) }, func(code int) {
+		if code != 0 {
+			t.Errorf("exit code %d", code)
+		}
+		close(done)
+	})
+	<-done
+	if got := delivered.String(); got != "AFTER" {
+		t.Fatalf("redelivered retained prefix: %q", got)
+	}
+	frame, ok := s.TerminalSnapshot()
+	if !ok || frame.Epoch == "" || !strings.Contains(strings.Join(frame.Lines, "\n"), "BEFORE") || !strings.Contains(strings.Join(frame.Lines, "\n"), "AFTER") {
+		t.Fatalf("screen was not rebuilt from retained output: %+v", frame)
+	}
+}
