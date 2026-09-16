@@ -12,7 +12,10 @@ tokens, shell commands or inferred authority. An explicit `observer:false`
 selects the operator credential without acquiring any control lease.
 
 The CLI negotiates `event_replay` and verifies block existence independently
-for each source. Initial status pins host identity. Each worker fetches one
+for each source. Initial status pins host identity. Follow mode revalidates status
+approximately once a second between pages while unpaused and output is writable;
+host replacement, retirement and withdrawn capability fail the source closed,
+and an exited block with no retained exit event can still finish. Each worker fetches one
 bounded page at a time; a quiet/unreachable source cannot hold up other sources.
 Events retain per-source journal order; there is no global time sort or clock
 agreement. Snapshot mode fixes a high-water mark from each source's first page.
@@ -27,9 +30,12 @@ Non-output/unknown events use marker code `m` and retain the original payload.
 Intervals are per source between emitted events (first is zero, backward clocks
 clamp to zero). This is an NDJSON composition format, not a standalone asciicast
 file: use `export` for that. No raw terminal controls are written to stdout.
+DEL/C1 controls are JSON-escaped too. This is standalone transport JSON, not
+HTML-safe markup; consumers must not embed it directly into an HTML script.
 
 Exact-type filters affect only event rows, never source errors, control replies,
-checkpoints or the end summary. Checkpoints advance over filtered records only
+checkpoints or the end summary. Checkpoints include recording-policy/purge metadata;
+unchanged quiet checkpoints are suppressed. Checkpoints advance over filtered records only
 after earlier selected records were written. The last emitted cursor is a resume
 position for that host/block; it is not a guarantee the downstream application
 processed the row. Cursor replay is at-least-once, not a distributed transaction.
@@ -55,8 +61,11 @@ not cancel subscriptions. Malformed/oversized commands produce explicit errors.
 
 Backpressure is bounded: at most eight in-flight/retained pages (256 events and
 16 MiB encoded JSON each), one encoded output row (32 MiB maximum), and one
-pending control command (16 KiB). Fetching pauses when a source already owns a
+pending control command (16 KiB), plus the last 128 bounded commands/replies for
+correlation. Fetching pauses when a source already owns a
 page. A blocked stdout stops delivery/fetch scheduling, never PTY/journal writes.
+These are retained protocol budgets, not an exact RSS ceiling: JSON encoding and
+decoding also create bounded transient allocations.
 Interrupt/deadline cancels local/SSH reads and unblocks owned stdout/stdin file
 handles; it never sends stop/input to a workload. Retention can overtake a paused
 source: emit `history_gap` and stop that source, never silently skip ahead.
@@ -81,8 +90,42 @@ user startup scripts/configuration from affecting the test. `CONTINUUM_TEST_NU`
 may point at a pinned disposable binary; no global installation is required.
 Missing Nushell must be reported as an unverified interoperability gate.
 
+In Nushell, substitute an actual state path and block ID:
+
+```nu
+continuum interleave --source '{"name":"build","state":"/absolute/state","block_id":"0123456789abcdef"}' --type output
+  | from json --objects
+  | where kind == event
+  | select source block_id seq event
+```
+
+Keep source/checkpoint/end rows too when detecting partial results or saving resume
+cursors; the display-only example above deliberately selects just event rows.
+
 Use deterministic fake pages for quiet sources, ordering, unknown/binary events,
 filter checkpoints, retention/degradation, malformed responses, backpressure,
 control correlation and cancellation. Use private real daemons and the D1 SSH
 shim for end-to-end merging and pause/continue without stopping work. Real
 two-host network faults remain the separate D4 gate.
+
+Focused gate observed on macOS arm64 with Nushell 0.114.1 on 2026-09-16:
+`CONTINUUM_TEST_NU=/path/to/nu python3 scripts/verify.py verify streams` passed.
+The disposable official release archive's SHA-256 was verified against its release
+metadata (`cb0ac9b97b985cd217a952f44438a14d2df2a95504d9bd8bc01ec73e1351b179`).
+No global installation, installed-service changes or model calls were needed.
+
+The full seven-feature `python3 scripts/verify.py verify` gate also passed with
+that Nushell binary: core race tests, vet, vulnerability scan, CLI/terminal journeys,
+legacy, pinned schema upgrade/rollback, SSH bridge and streams. The upgrade journey
+also consumed the pinned schema-1 daemon with the new stream client. A Linux amd64
+cross-build succeeded; native Linux and real two-host network behavior remain
+unverified by these runs.
+
+Direct security review: this CLI only sends authorized `status`/`events` reads;
+pause/continue/cancel never acquire leases or send workload mutations. Source and
+command sizes, response/page/order validation and bounded reply caching prevent
+unbounded queues. Host identity is pinned and periodically revalidated; output is
+JSON-escaped and never raw terminal control bytes. Remote bearer credentials remain
+on the owning host through D1's SSH bridge. As with D1, choosing observer credentials
+does not restrict the underlying SSH account's OS authority. No browser UI changed;
+the user-facing walkthrough is the private real-binary CLI/structured-shell journey.

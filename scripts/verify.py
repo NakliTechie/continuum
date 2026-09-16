@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy|upgrade|remote]. No live endpoint reuse."""
+"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy|upgrade|remote|streams]. No live endpoint reuse."""
 import argparse
 import json
 import os
@@ -37,7 +37,7 @@ def stray_go_dirs():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['doctor', 'verify'])
-    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote'])
+    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams'])
     opts = p.parse_args()
     missing = [name for name in ['go', 'git', 'python3'] if not shutil.which(name)]
     if missing:
@@ -58,7 +58,7 @@ def main():
             report['stray_go_dirs'] = stray
         print(json.dumps(report))
         return
-    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote']
+    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams']
     with tempfile.TemporaryDirectory(prefix='continuum-verify-') as directory:
         temp = Path(directory)
         home, tmp = temp / 'home', temp / 'tmp'
@@ -106,6 +106,11 @@ def main():
             binary = temp / 'continuum-remote'
             run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
             run(['python3', 'scripts/check_remote.py', '--binary', str(binary)], env=env)
+        if 'streams' in features:
+            run(['go', 'test', '-race', '-count=1', '-timeout=60s', './internal/cli', '-run', 'TestStream'], env=env)
+            binary = temp / 'continuum-streams'
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
+            run(['python3', 'scripts/check_streams.py', '--binary', str(binary)], env=env)
     print(json.dumps({'class': 'ok', 'check': 'verify', 'features': features, 'checkout': str(ROOT)}))
 
 if __name__ == '__main__':

@@ -52,6 +52,7 @@ Commands:
   screen --block ID        inspect a current/final screen without taking control; --json for frames
   contract                 print the /v1 contract version and capabilities (--json for the full record)
   events --block ID        replay bounded recorded events; --follow keeps watching
+  interleave --source JSON merge labelled block streams; --type TYPE filters; --control enables pause/continue
   export --block ID        write the block's output as an asciicast v3 recording to stdout
   purge --block ID         delete an exited block's output but keep lifecycle records
   retire --block ID        delete an exited block and all of its retained state
@@ -170,6 +171,9 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if args[0] == holder.Subcommand {
 		// The daemon re-executes itself as a block holder; never a user command.
 		return holder.Main(in)
+	}
+	if args[0] == "interleave" {
+		return interleaveCLI(args[1:], in, out, diag)
 	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)

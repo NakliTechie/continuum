@@ -74,9 +74,25 @@ and does not change execution authority. Browse roots currently require `serve`
 per request; real-network performance and fault testing remain outstanding.
 See [the directory/SSH contract](docs/remote-directories.md).
 
+## Compose block streams (experimental)
+
+```sh
+continuum interleave \
+  --source '{"name":"build","state":"/absolute/state","block_id":"LOCAL_BLOCK_ID"}' \
+  --source '{"name":"tests","host":"user@host","state":"/remote/state","block_id":"REMOTE_BLOCK_ID"}' \
+  --type output
+```
+
+Replace the block IDs with full IDs from `open` or `status`. Output is source-labelled
+NDJSON with original payloads, per-source cursors and asciicast-shaped event triples.
+Add `--follow` for ongoing observation and `--control` for stdin pause/continue/cancel
+commands. These controls affect the observer only, never the workload. Sources use
+observer credentials by default. See [stream limits, control replies and Nushell
+usage](docs/streams.md).
+
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade and isolated SSH-bridge compatibility). Not yet done: structured-session (ACP) restart survival, native Linux, real-network remote and broader real-provider validation.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH-bridge compatibility and stream composition). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. Not yet done: structured-session (ACP) restart survival, native Linux, real-network remote and broader real-provider validation.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions

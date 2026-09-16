@@ -151,6 +151,16 @@ def main():
             rpc(baseline, "input", "--block", block, data=b"before-upgrade\n")
             wait_for("schema-1 daemon did not journal PTY output",
                      lambda: b"before-upgrade" in output(baseline, block))
+            # D2 adds client composition, not a new daemon protocol. The pinned
+            # schema-1 daemon's existing event_replay capability is sufficient.
+            composed = subprocess.run(
+                [str(candidate), "interleave", "--source",
+                 json.dumps(dict(name="old", state=str(state), block_id=block)), "--type", "output"],
+                env=env, capture_output=True, timeout=12)
+            assert composed.returncode == 0, (composed.stdout, composed.stderr)
+            rows = [json.loads(line) for line in composed.stdout.splitlines()]
+            assert any(row["kind"] == "event" and "before-upgrade" in row["event"][2] for row in rows)
+            assert rows[-1]["kind"] == "end" and rows[-1]["sources"][0]["state"] == "completed"
             stop_daemon(replacement=True)
 
             # A rollback point must be taken while the database lock is free.
@@ -222,7 +232,8 @@ def main():
             stop_daemon()
             print("PASS: private service install/update/rollback units, schema-1 migration, "
                   "blind-downgrade refusal, matching-backup rollback, same-PID holder continuity, "
-                  "old-client/new-daemon and new-client/old-daemon compatibility")
+                  "old-client/new-daemon and new-client/old-daemon compatibility, "
+                  "new stream client/pinned old daemon")
         finally:
             stop_daemon()
             for pid in child_pids:
