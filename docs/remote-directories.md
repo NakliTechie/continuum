@@ -6,10 +6,14 @@
 The modern API stays on its private Unix socket. A remote client uses existing
 key-authenticated SSH (`--host USER@HOST`, mandatory remote `--state ABSOLUTE_DIR`)
 to run `continuum rpc` on the owning host. It sends one bounded JSON request on
-stdin and receives the normal envelope on stdout. Credentials never cross SSH:
-the bridge reads that host's private operator/observer credential. SSH is
+stdin and receives the normal envelope on stdout. Daemon bearer credentials stay
+on their owning host: the bridge reads that host's private operator/observer token.
+Control leases do travel inside encrypted SSH requests/responses. SSH is
 non-interactive and requires an already trusted host key. There is no listener,
-pairing, token distribution, service installation or automatic retry.
+pairing, bearer-token distribution, service installation or automatic retry.
+Port, SSH-agent and X11 forwarding are disabled for the bridge. The SSH account
+retains its full OS-account authority: `--observer` selects an API role, not a
+restricted SSH identity or a mechanism for delegating to untrusted users.
 
 `--remote-binary` selects an installed executable (default `continuum`). All
 remote shell arguments are quoted; the payload is never shell text. Remote
@@ -34,8 +38,8 @@ grant execution; existing operator `open --cwd` remains separate and unrestricte
 by browse roots. This is not a multi-user execution sandbox.
 
 Pages contain host identity, root, path, entry name/path/type and an opaque next
-cursor. Defaults: 100 entries, maximum 200; sorted by name. A scan is bounded at
-10,000 entries and 2 MiB of names; larger directories report resource exhaustion
+cursor. Defaults: 100 entries, maximum 200 and 512 KiB of page JSON; sorted by
+name. A scan is bounded at 10,000 entries and 2 MiB of names; larger directories report resource exhaustion
 without claiming a complete listing. Cursors bind the path, root, directory
 identity and complete names/types digest. Changed listings return a conflict and
 require restarting pagination. Cursors are observations, not durable snapshots;
@@ -56,3 +60,14 @@ cancellation and ambiguous mutations. The CLI journey uses two isolated daemon
 states with a test SSH process that invokes the real bridge. That is transport
 contract evidence, not real-network evidence. A separate real SSH probe/exercise
 must succeed before claiming the two-host network gate.
+
+Implemented on 2026-09-16. `python3 scripts/verify.py verify` passed on macOS:
+core race tests, vet, vulnerability scan, CLI/terminal journeys, legacy and
+upgrade compatibility, and the new `remote` gate. The latter includes directory
+permission/type/traversal cases, root replacement and symlink-swap races,
+count/JSON-byte pagination limits, changed-directory cursors, SSH quoting,
+cancellation, response bounds, lost-mutation reconciliation, and two terminal
+clients through the real bridge. A Linux amd64 cross-build passed; it is not
+native Linux runtime evidence. macOS rejects non-UTF-8 filenames, so that
+filesystem-specific branch still needs Linux execution. No browser UI changed.
+Real SSH/network testing is not claimed; the available tailnet was stopped.

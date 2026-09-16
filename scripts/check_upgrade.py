@@ -143,6 +143,7 @@ def main():
             assert str(baseline) in old_unit
             start(baseline)
             initial = rpc(baseline, "status")["result"]
+            assert rpc(candidate, "directories", code=9)["code"] == "directories_v1", "new directory client must fail closed on old daemon"
             opened = rpc(baseline, "open", "--cwd", str(root), "--", "/bin/cat")["result"]
             block, child_pid = opened["block_id"], opened["pid"]
             child_pids.add(child_pid)

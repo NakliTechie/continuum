@@ -36,10 +36,10 @@ func TestVersionOperationPinsTheContract(t *testing.T) {
 		if got := join(v.Capabilities.Stable); got != "pty,observers,control_lease,event_replay,control_renewal,legacy_1.3" {
 			t.Fatalf("stable capability set changed without intent: %s", got)
 		}
-		if got := join(v.Capabilities.Experimental); got != "terminal_screen_v1,terminal_input_base64,recording_policy_v1" {
+		if got := join(v.Capabilities.Experimental); got != "terminal_screen_v1,terminal_input_base64,recording_policy_v1,directories_v1" {
 			t.Fatalf("experimental capability set changed: %s", got)
 		}
-		if got := join(v.Operations); got != "version,status,events,screen,open,acquire,renew,release,takeover,input,resize,stop,purge,retire" {
+		if got := join(v.Operations); got != "version,status,events,screen,open,acquire,renew,release,takeover,input,resize,stop,purge,retire,directories" {
 			t.Fatalf("operation vocabulary changed without intent: %s", got)
 		}
 	}
@@ -51,7 +51,7 @@ func TestVersionOperationPinsTheContract(t *testing.T) {
 		ContractVersion string `json:"contract_version"`
 	}
 	_ = json.Unmarshal(sr.Result, &sv)
-	if join(sv.Capabilities) != "pty,observers,control_lease,event_replay,control_renewal,legacy_1.3,terminal_screen_v1,terminal_input_base64,recording_policy_v1" || sv.ContractVersion != "1.0" {
+	if join(sv.Capabilities) != "pty,observers,control_lease,event_replay,control_renewal,legacy_1.3,terminal_screen_v1,terminal_input_base64,recording_policy_v1,directories_v1" || sv.ContractVersion != "1.0" {
 		t.Fatalf("status capabilities/contract drifted: %+v", sv)
 	}
 	// A mutation still needs the operator token; version being a read must not

@@ -57,6 +57,9 @@ func validBlock(id string) bool {
 // attach uses complete server frames throughout. It never replays application
 // bytes into a second parser, or asks the user's terminal to answer queries.
 func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag io.Writer) int {
+	return attachContext(context.Background(), dir, block, observer, takeover, in, out, diag)
+}
+func attachContext(parent context.Context, dir, block string, observer, takeover bool, in io.Reader, out, diag io.Writer) int {
 	if !validBlock(block) {
 		fmt.Fprintln(diag, "attach requires the full --block ID from open or status")
 		return 2
@@ -95,7 +98,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		fmt.Fprintln(diag, err)
 		return 2
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer cancel()
 	rpc := func(q api.Request) api.Response {
 		timeout := 3 * time.Second
@@ -173,7 +176,7 @@ func attach(dir, block string, observer, takeover bool, in io.Reader, out, diag 
 		// Attach's lease stays in this process; a second attach must acquire or
 		// explicitly take over, never accidentally share a saved controller secret.
 		defer func() {
-			c, stop := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			c, stop := context.WithTimeout(context.WithoutCancel(parent), 1500*time.Millisecond)
 			defer stop()
 			r := call(c, dir, false, api.Request{Operation: "release", Block: block, Lease: lease, RequestID: journal.ID()})
 			if r.Class != "ok" && r.Code != "stale_control" && r.Code != "not_running" {

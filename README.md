@@ -51,9 +51,32 @@ To run it always-on (launchd on macOS, systemd `--user` on Linux) under its own 
 
 Point Menagerie's Add-relay form at the `ws://` address `serve` prints, using `operator.token` from the state directory. The `menagerie-relay` entry point and the `continuum legacy *` subcommands preserve Menagerie's existing configuration and semantics; an installed-service cutover is a separate, validated step.
 
+## SSH clients and scoped directory browsing (experimental)
+
+On the owning host, opt into browsing one or more roots when starting a foreground daemon:
+
+```sh
+continuum serve --state /absolute/state --browse-root /absolute/workspaces
+continuum directories --state /absolute/state --path /absolute/workspaces --limit 50
+```
+
+With an existing trusted SSH host/key and Continuum on that host:
+
+```sh
+continuum directories --host user@host --state /remote/state
+continuum open --host user@host --state /remote/state --cwd /remote/workspace -- /bin/sh
+```
+
+`--remote-binary /absolute/path/to/continuum` selects a non-PATH installation.
+Daemon bearer tokens remain on the owning host. Browsing is operator-only, defaults off,
+and does not change execution authority. Browse roots currently require `serve`
+(service-unit persistence is not implemented). Remote calls use one SSH process
+per request; real-network performance and fault testing remain outstanding.
+See [the directory/SSH contract](docs/remote-directories.md).
+
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy and schema-upgrade compatibility). Not yet done: structured-session (ACP) restart survival, native Linux and real-provider validation.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade and isolated SSH-bridge compatibility). Not yet done: structured-session (ACP) restart survival, native Linux, real-network remote and broader real-provider validation.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions

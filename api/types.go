@@ -7,6 +7,8 @@ import (
 )
 
 type Request struct {
+	Path           string   `json:"path,omitempty"`
+	Limit          int      `json:"limit,omitempty"`
 	Cursor         string   `json:"cursor,omitempty"`
 	Terminal       string   `json:"terminal,omitempty"`
 	Operation      string   `json:"operation"`

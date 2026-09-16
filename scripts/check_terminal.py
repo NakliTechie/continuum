@@ -71,12 +71,13 @@ def wait_until(message, predicate, timeout=5):
     raise AssertionError(message)
 
 class View:
-    def __init__(self,binary,state,block,env,observer=False):
+    def __init__(self,binary,state,block,env,observer=False,extra_args=()):
         self.master,self.slave=pty.openpty()
         self.resize(60 if observer else 80,15 if observer else 24)
         self.before=termios.tcgetattr(self.slave)
         self.flags=fcntl.fcntl(self.slave,fcntl.F_GETFL)
         args=[str(binary),'attach','--state',str(state),'--block',block]
+        args.extend(extra_args)
         if observer:args.append('--observer')
         self.process=subprocess.Popen(args,env=env,stdin=self.slave,stdout=self.slave,stderr=self.slave,start_new_session=True)
         self.output=b''

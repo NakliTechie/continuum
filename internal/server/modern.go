@@ -38,7 +38,7 @@ const ContractVersion = "1.0"
 // a pinned test guards it.
 var (
 	stableCapabilities       = []string{"pty", "observers", "control_lease", "event_replay", "control_renewal", "legacy_1.3"}
-	experimentalCapabilities = []string{"terminal_screen_v1", "terminal_input_base64", "recording_policy_v1"}
+	experimentalCapabilities = []string{"terminal_screen_v1", "terminal_input_base64", "recording_policy_v1", "directories_v1"}
 	// stableOperations is the frozen /v1 operation vocabulary. version/status/
 	// events/screen are reads; the rest mutate through the request-id ledger.
 	stableOperations = []string{"version", "status", "events", "screen", "open", "acquire", "renew", "release", "takeover", "input", "resize", "stop", "purge", "retire"}
@@ -64,6 +64,7 @@ type Modern struct {
 	retiredMu    sync.Mutex
 	retired      map[string]screenResult
 	retiredOrder []string
+	directories  *directoryBrowser // immutable after the API starts serving
 }
 
 func (s *Server) EnableModern(store *journal.Store, observer string) *Modern {
@@ -220,6 +221,12 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error(q.RequestID, "access_denied", "operator_required", "observer credentials cannot change sessions", "status"))
 		return
 	}
+	// Directory reads require operator authority, but neither a control lease
+	// nor a mutation ledger entry. Do not widen the existing observer role.
+	if q.Operation == "directories" {
+		reply(m.listDirectories(r.Context(), q))
+		return
+	}
 	if read {
 		reply(m.read(q))
 		return
@@ -245,7 +252,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			"schema_version":           1,
 			"protocol":                 "continuum.local-alpha.1",
 			"server":                   m.s.cfg.ServerVersion,
-			"operations":               stableOperations,
+			"operations":               append(append([]string{}, stableOperations...), "directories"),
 			"capabilities":             map[string]any{"stable": stableCapabilities, "experimental": experimentalCapabilities},
 			"process_restart_survival": m.s.cfg.HoldersState != "",
 		})

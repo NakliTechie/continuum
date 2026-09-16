@@ -46,6 +46,7 @@ First use (two terminals):
 Commands:
   serve                    run a foreground local daemon; Ctrl-C stops its work
   status                   inspect up to 20 recorded blocks; --cursor CURSOR pages, --block ID selects one
+  directories              list allowed roots, or --path DIR [--limit N --cursor CURSOR] within a root
   open -- COMMAND ARGS     launch a PTY; arguments are preserved exactly; --cwd DIR sets its directory
   attach --block ID        interactive screen-v1 terminal; Ctrl-] detaches
   screen --block ID        inspect a current/final screen without taking control; --json for frames
@@ -65,12 +66,16 @@ Commands:
   version                  show build version
   service SUB              install/cutover/uninstall/status the always-on Continuum daemon (launchd/systemd)
   legacy SUBCOMMAND        Menagerie relay commands (serve, agents, token, service, materialise)
+  rpc                      one-shot JSON stdio bridge for an authenticated SSH client
 
 Common flags: --state ABSOLUTE_DIR (default: user config directory/continuum),
   --json (machine envelope), --request-id ID (reuse only for the same mutation).
 Events: --after CURSOR, --follow, --text (printable text and colour only),
   --raw (byte-exact PTY replay including control sequences; trusted output only).
 Serve: --listen 127.0.0.1:PORT (default: random free port), --origin URL.
+Browse: serve --browse-root ABSOLUTE_DIR (repeatable; disabled by default; operator only).
+Remote: --host USER@HOST --state REMOTE_ABSOLUTE_DIR [--remote-binary PATH].
+Uses existing non-interactive SSH trust; remote open requires an absolute --cwd.
 Observation: --observer uses the read-only observer credential.
 Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into server-owned screens.
 Recording: open --recording none|visible|lines:N|full (default full); visible requires screen-v1.
@@ -189,6 +194,12 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	adoptRelay := f.String("adopt-relay", "", "serve/service: adopt a menagerie-relay config (token, port, origins, agents)")
 	take := f.Bool("takeover", false, "explicitly take control when attaching")
 	format := f.String("format", "asciicast", "export format: asciicast (v3)")
+	remoteHost := f.String("host", "", "SSH destination (existing host key and key authentication)")
+	remoteBinary := f.String("remote-binary", "continuum", "executable on the SSH host")
+	directoryPath := f.String("path", "", "owning-host directory path")
+	pageLimit := f.Int("limit", 0, "directory page size, 1..200 (default 100)")
+	var browseRoots []string
+	f.Func("browse-root", "serve: allowed absolute directory root (repeatable)", func(value string) error { browseRoots = append(browseRoots, value); return nil })
 	f.Usage = func() {} // parse errors get one line below; -h prints the full help
 	if command == "attach" {
 		f.Usage = func() { fmt.Fprint(diag, attachHelp) }
@@ -209,6 +220,31 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	}
 	set := map[string]bool{}
 	f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	// Service has its own subcommand/flag order; validate these new flags again
+	// after that parse so a misplaced --host can never install a local service.
+	validateTarget := func() bool {
+		f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+		if (set["host"] && (!validRemoteHost(*remoteHost) || !set["state"])) || (set["remote-binary"] && *remoteHost == "") || strings.ContainsRune(*remoteBinary, 0) || *remoteBinary == "" {
+			fmt.Fprintln(diag, "--host requires a valid SSH destination and explicit --state; --remote-binary requires --host")
+			return false
+		}
+		if *remoteHost != "" && (command == "serve" || command == "service" || command == "compact" || command == "rpc") {
+			fmt.Fprintln(diag, "--host is for client API operations only; service/serve/compact/rpc are local")
+			return false
+		}
+		if len(browseRoots) > 0 && command != "serve" || (set["path"] || set["limit"]) && command != "directories" {
+			fmt.Fprintln(diag, "--browse-root is for serve; --path and --limit are for directories")
+			return false
+		}
+		return true
+	}
+	if !validateTarget() {
+		return 2
+	}
+	baseContext := context.Background()
+	if *remoteHost != "" {
+		baseContext = context.WithValue(baseContext, remoteKey{}, remoteTarget{*remoteHost, *remoteBinary})
+	}
 	if !filepath.IsAbs(*state) {
 		fmt.Fprintln(diag, "--state must be an absolute directory")
 		return 2
@@ -234,7 +270,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprintln(diag, "serve accepts flags only")
 			return 2
 		}
-		if err := serve(*state, *listen, *origin, *adoptRelay, diag); err != nil {
+		if err := serve(*state, *listen, *origin, *adoptRelay, diag, browseRoots...); err != nil {
 			fmt.Fprintln(diag, err)
 			return 5
 		}
@@ -253,10 +289,13 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 				return 2
 			}
 		}
+		if !validateTarget() {
+			return 2
+		}
 		return service(*state, *listen, *origin, *adoptRelay, []string{sub}, out, diag)
 	}
 	switch command {
-	case "status", "contract", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire", "compact":
+	case "status", "contract", "directories", "rpc", "open", "screen", "attach", "events", "export", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire", "compact":
 	default:
 		fmt.Fprintln(diag, "unknown command; run continuum help")
 		return 2
@@ -264,6 +303,11 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if f.NArg() != 0 && command != "open" {
 		fmt.Fprintln(diag, "unexpected arguments; use --block ID")
 		return 2
+	}
+	if command == "rpc" {
+		ctx, cancel := signal.NotifyContext(baseContext, os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return bridge(ctx, *state, *observer, in, out)
 	}
 	if (*plain || *rawOut) && (command != "events" || *machine) {
 		fmt.Fprintln(diag, "--text and --raw are for events and cannot combine with --json")
@@ -320,7 +364,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprintln(diag, "supported export format: asciicast")
 			return 2
 		}
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(baseContext, os.Interrupt)
 		defer cancel()
 		return exportCast(ctx, *state, *block, *observer, out, diag)
 	}
@@ -329,13 +373,16 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprintln(diag, "attach is interactive; use screen --json for machine output")
 			return 2
 		}
-		return attach(*state, *block, *observer, *take, in, out, diag)
+		return attachContext(baseContext, *state, *block, *observer, *take, in, out, diag)
 	}
 	operation := command
 	if command == "contract" {
 		operation = "version" // /v1 op name; `continuum version` stays the local build-version print
 	}
 	q := api.Request{Terminal: *profile, Cursor: *cursor, Operation: operation, RequestID: *request, Block: *block, After: *after, Cols: *cols, Rows: *rows}
+	if command == "directories" {
+		q.Path, q.Limit = *directoryPath, *pageLimit
+	}
 	mut := !readOperation(operation) // classify by the /v1 op (contract → version is a read)
 	if mut && q.RequestID == "" {
 		q.RequestID = journal.ID()
@@ -356,7 +403,11 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		}
 		q.Args = f.Args()
 		q.Cwd = *cwd
-		if q.Cwd == "" {
+		if *remoteHost != "" {
+			if !filepath.IsAbs(q.Cwd) {
+				return render(api.Error(q.RequestID, "invalid_request", "remote_cwd", "remote open requires an explicit absolute --cwd on the owning host", "help"), *machine, out, diag)
+			}
+		} else if q.Cwd == "" {
 			q.Cwd, _ = os.Getwd()
 		} else if abs, err := filepath.Abs(q.Cwd); err == nil {
 			q.Cwd = abs // the daemon resolves nothing relative to this client
@@ -383,7 +434,11 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 		if *block == "" {
 			return render(api.Error(q.RequestID, "invalid_request", "block_id", "use the full block ID from status or open", "status"), *machine, out, diag)
 		}
-		leasePath = filepath.Join(*state, "lease-"+*block)
+		leaseDir, err := leaseDirectory(baseContext, *state)
+		if err != nil {
+			return render(api.Error(q.RequestID, "access_denied", "lease_cache", err.Error(), "help"), *machine, out, diag)
+		}
+		leasePath = filepath.Join(leaseDir, "lease-"+*block)
 		if command != "acquire" && command != "takeover" {
 			b, err := privateRead(leasePath)
 			if err != nil {
@@ -392,8 +447,13 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			q.Lease = strings.TrimSpace(string(b))
 		}
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(baseContext, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if command == "directories" {
+		if v := requireCapability(ctx, *state, *observer, "directories_v1"); v.Class != "ok" {
+			return render(v, *machine, out, diag)
+		}
+	}
 	// Older /v1 daemons do not understand recording fields: the pinned daemon
 	// rejects them, while any permissive decoder could silently ignore none,
 	// visible or lines:N and retain output the operator asked not to retain.
@@ -558,6 +618,9 @@ func render(v api.Response, machine bool, out, diag io.Writer) int {
 	return api.Exit(v.Class)
 }
 func call(ctx context.Context, dir string, observer bool, q api.Request) api.Response {
+	if target, ok := ctx.Value(remoteKey{}).(remoteTarget); ok {
+		return remoteCall(ctx, target, dir, observer, q)
+	}
 	fail := func(code, msg string) api.Response { return api.Error(q.RequestID, "unreachable", code, msg, "serve") }
 	if ipc.Absent(dir) {
 		return fail("daemon_not_running", "start continuum serve with the same --state directory")
@@ -611,7 +674,7 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	}
 	return v
 }
-func serve(dir, addr, origin, adoptRelay string, diag io.Writer) error {
+func serve(dir, addr, origin, adoptRelay string, diag io.Writer, browseRoots ...string) error {
 	var relay *config.Config
 	var relayToken string
 	if adoptRelay != "" {
@@ -683,6 +746,10 @@ func serve(dir, addr, origin, adoptRelay string, diag io.Writer) error {
 	cfg.ResolveAgents(nil)
 	srv := server.New(cfg)
 	modern := srv.EnableModern(store, observer)
+	if err := modern.ConfigureDirectories(browseRoots); err != nil {
+		return err
+	}
+	defer modern.CloseDirectories()
 	// Blocks a previous daemon left running come back before any door opens.
 	srv.AdoptHolders()
 	// Two doors, one registry: the modern API on a private Unix socket in the
@@ -777,7 +844,7 @@ func parseRecording(v string) (string, int, error) {
 }
 
 func readOperation(op string) bool {
-	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export"
+	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export" || op == "directories"
 }
 
 // exportCast pages a block's journal and writes an asciicast v3 stream. It is a

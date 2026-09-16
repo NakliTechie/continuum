@@ -31,10 +31,10 @@ never mutates state.
   "schema_version": 1,
   "protocol": "continuum.local-alpha.1",
   "server": "0.1.0-alpha.2-dev",
-  "operations": ["version","status","events","screen","open","acquire","renew","release","takeover","input","resize","stop","purge","retire"],
+  "operations": ["version","status","events","screen","open","acquire","renew","release","takeover","input","resize","stop","purge","retire","directories"],
   "capabilities": {
     "stable": ["pty","observers","control_lease","event_replay","control_renewal","legacy_1.3"],
-    "experimental": ["terminal_screen_v1","terminal_input_base64","recording_policy_v1"]
+    "experimental": ["terminal_screen_v1","terminal_input_base64","recording_policy_v1","directories_v1"]
   },
   "process_restart_survival": true
 }
@@ -88,6 +88,15 @@ the `purge`/`retire` mutations. `visible` requires `screen-v1`; `lines` requires
 clients. The offline CLI-only `compact` command is not a `/v1` operation. See
 [terminal-screen-api.md](terminal-screen-api.md) and
 [local-alpha.md](local-alpha.md).
+
+`directories_v1` adds an operator-only read, `directories`, with optional `path`,
+`limit` and `cursor`. No path lists configured roots; a path lists entries with
+bounded, change-detecting pagination. Directory observations have `volatile`
+durability. The capability advertises support even when browsing is disabled;
+operators opt in through `serve --browse-root`. The SSH stdio bridge carries
+these same envelopes without exposing a new API listener or sending daemon bearer tokens
+to the client. See [remote-directories.md](remote-directories.md) for authority,
+confinement, limits, error classes and transport behavior.
 
 ## Not covered by this contract
 
