@@ -117,7 +117,7 @@ See [the access and operations contract](docs/access-operations.md).
 
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition and managed headless cycle). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. Still open: structured-session (ACP) process survival across daemon restart, Menagerie client CU1–CU7, broad provider/platform validation and untrusted multi-user hosting.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition, managed headless cycle and network-free WAN-runner checks). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. An opt-in [three-server WAN drill](docs/wan-multi-server-test.md) is ready for a later run; its real-host results are not yet claimed. Still open: structured-session (ACP) process survival across daemon restart, Menagerie client CU1–CU7, broad provider/platform validation and untrusted multi-user hosting.
 
 Tested on 2026-09-17: macOS/arm64 full isolated gate; Linux/arm64 Docker core
 race gate and headless managed cycle; two macOS hosts with one dropped SSH
