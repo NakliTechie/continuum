@@ -11,3 +11,4 @@ coverage.out
 # Worktree plan is a symlink to the canonical ignored directory.
 /plan
 .worktrees/
+__pycache__/
