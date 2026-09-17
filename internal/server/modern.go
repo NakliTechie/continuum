@@ -48,6 +48,23 @@ func allCapabilities() []string {
 	return append(append([]string{}, stableCapabilities...), experimentalCapabilities...)
 }
 
+func (m *Modern) capabilities() []string {
+	caps := allCapabilities()
+	if m.waits != nil {
+		caps = append(caps, "waits_v1")
+		caps = append(caps, "access_grants_v1")
+	}
+	return caps
+}
+
+func (m *Modern) operations() []string {
+	ops := append(append([]string{}, stableOperations...), "directories")
+	if m.waits != nil {
+		ops = append(ops, "observe", "wait_create", "wait_get", "wait_output", "wait_cancel", "peer_add", "peer_remove", "peer_list", "prompt_wait", "permission_respond", "grant_create", "grant_revoke", "grant_list", "share_set", "share_get", "audit_list")
+	}
+	return ops
+}
+
 type lease struct {
 	Token   string
 	Expires time.Time
@@ -56,6 +73,7 @@ type lease struct {
 // Modern uses the legacy server's process registry. It owns durable observation
 // and modern leases, never another process manager.
 type Modern struct {
+	waits        *waitCoordinator
 	s            *Server
 	Store        *journal.Store
 	observer     string
@@ -74,6 +92,21 @@ func (s *Server) EnableModern(store *journal.Store, observer string) *Modern {
 }
 func (s *Server) record(id, kind string, payload any) {
 	if m := s.modern; m != nil {
+		if journal.Lifecycle(kind) {
+			var turn uint64
+			if e := s.entry(id); e != nil {
+				e.statusMu.Lock()
+				turn = e.turn
+				e.statusMu.Unlock()
+			}
+			p := map[string]any{"turn": turn}
+			if original, ok := payload.(map[string]any); ok {
+				for k, v := range original {
+					p[k] = v
+				}
+			}
+			payload = p
+		}
 		if err := m.Store.Append(id, kind, payload); err != nil {
 			m.degraded.Store(true)
 		}
@@ -185,17 +218,26 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error("", "invalid_request", "method", "use POST /v1", "help"))
 		return
 	}
-	// No browser origin is accepted by this alpha API. Menagerie uses the
-	// separately gated legacy adapter; a read-only bearer never registers there.
+	// The private /v1 socket never accepts a browser Origin. The loopback
+	// observer doorway checks its own Origin and read-only credential first.
 	if r.Header.Get("Origin") != "" {
 		w.WriteHeader(403)
-		reply(api.Error("", "access_denied", "origin", "browser requests use the legacy adapter", "help"))
+		reply(api.Error("", "access_denied", "origin", "browser requests use the observer doorway", "help"))
 		return
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	operator := token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(m.s.cfg.RegistrationToken)) == 1
 	viewer := token != "" && m.observer != "" && subtle.ConstantTimeCompare([]byte(token), []byte(m.observer)) == 1
-	if !operator && !viewer {
+	var scoped *scopedGrant
+	if !operator && !viewer && token != "" {
+		var err error
+		scoped, err = m.findGrant(token)
+		if err != nil && !errors.Is(err, journal.ErrNotFound) {
+			reply(api.Error("", "resource_exhausted", "grant_store", "cannot verify scoped credential", "status"))
+			return
+		}
+	}
+	if !operator && !viewer && scoped == nil {
 		w.WriteHeader(401)
 		reply(api.Error("", "access_denied", "authentication", "valid bearer token required", "help"))
 		return
@@ -211,11 +253,31 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(api.Error("", "invalid_request", "request", "one JSON object required", "help"))
 		return
 	}
-	if len(q.RequestID) > 128 || len(q.Block) > 128 || len(q.Lease) > 128 || len(q.Recording) > 32 {
+	if len(q.RequestID) > 128 || len(q.Block) > 128 || len(q.Lease) > 128 || len(q.Recording) > 32 || len(q.WaitID) > 128 {
 		reply(api.Error("", "invalid_request", "field_size", "request field exceeds its size limit", "help"))
 		return
 	}
-	read := q.Operation == "version" || q.Operation == "status" || q.Operation == "events" || q.Operation == "screen"
+	if scoped != nil {
+		// Authenticate again under the same lock used by grant revocation and
+		// sharing updates. A credential checked before a concurrent revoke must
+		// not execute a mutation after that revoke commits.
+		m.s.controlMu.Lock()
+		fresh, err := m.findGrant(token)
+		if err != nil {
+			m.s.controlMu.Unlock()
+			if errors.Is(err, journal.ErrNotFound) {
+				w.WriteHeader(401)
+				reply(api.Error(q.RequestID, "access_denied", "authentication", "credential was revoked", "help"))
+			} else {
+				reply(api.Error(q.RequestID, "resource_exhausted", "grant_store", "cannot verify scoped credential", "status"))
+			}
+			return
+		}
+		reply(m.scoped(q, fresh))
+		m.s.controlMu.Unlock()
+		return
+	}
+	read := q.Operation == "version" || q.Operation == "status" || q.Operation == "events" || q.Operation == "screen" || q.Operation == "observe" || q.Operation == "wait_get" || q.Operation == "wait_output"
 	if !read && !operator {
 		w.WriteHeader(403)
 		reply(api.Error(q.RequestID, "access_denied", "operator_required", "observer credentials cannot change sessions", "status"))
@@ -225,6 +287,32 @@ func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// nor a mutation ledger entry. Do not widen the existing observer role.
 	if q.Operation == "directories" {
 		reply(m.listDirectories(r.Context(), q))
+		return
+	}
+	if q.Operation == "grant_create" || q.Operation == "grant_revoke" || q.Operation == "grant_list" || q.Operation == "share_set" || q.Operation == "share_get" || q.Operation == "audit_list" {
+		if m.waits == nil {
+			reply(api.Error(q.RequestID, "unsupported", "access_grants_v1", "scoped access is disabled", "contract"))
+			return
+		}
+		if m.s.closing.Load() || m.degraded.Load() {
+			reply(api.Error(q.RequestID, "resource_exhausted", "store_unavailable", "access management unavailable", "status"))
+			return
+		}
+		m.s.controlMu.Lock()
+		reply(m.admin(q))
+		m.s.controlMu.Unlock()
+		return
+	}
+	if q.Operation == "wait_create" || q.Operation == "wait_cancel" || q.Operation == "wait_get" || q.Operation == "wait_output" || q.Operation == "peer_add" || q.Operation == "peer_remove" || q.Operation == "peer_list" {
+		if m.waits == nil {
+			reply(api.Error(q.RequestID, "unsupported", "waits_v1", "coordinator is disabled", "contract"))
+			return
+		}
+		if (q.Operation == "wait_create" || q.Operation == "wait_cancel" || q.Operation == "peer_add" || q.Operation == "peer_remove") && (m.s.closing.Load() || m.degraded.Load()) {
+			reply(api.Error(q.RequestID, "resource_exhausted", "coordinator_unavailable", "coordinator is stopping or storage is degraded", "status"))
+			return
+		}
+		reply(m.waits.handle(q))
 		return
 	}
 	if read {
@@ -252,12 +340,27 @@ func (m *Modern) read(q api.Request) api.Response {
 			"schema_version":           1,
 			"protocol":                 "continuum.local-alpha.1",
 			"server":                   m.s.cfg.ServerVersion,
-			"operations":               append(append([]string{}, stableOperations...), "directories"),
-			"capabilities":             map[string]any{"stable": stableCapabilities, "experimental": experimentalCapabilities},
+			"operations":               m.operations(),
+			"capabilities":             map[string]any{"stable": stableCapabilities, "experimental": m.capabilities()[len(stableCapabilities):]},
 			"process_restart_survival": m.s.cfg.HoldersState != "",
 		})
 	case "screen":
 		return m.screen(q)
+	case "observe":
+		if m.waits == nil {
+			return api.Error(q.RequestID, "unsupported", "waits_v1", "coordinator is disabled", "contract")
+		}
+		if q.Block == "" {
+			return api.Error(q.RequestID, "invalid_request", "block_id", "block_id required", "help")
+		}
+		o, err := m.Store.Observe(q.Block)
+		if errors.Is(err, journal.ErrNotFound) {
+			return api.Error(q.RequestID, "conflict", "block_unavailable", "block not found", "status")
+		}
+		if err != nil {
+			return api.Error(q.RequestID, "resource_exhausted", "store_read", "cannot read lifecycle", "status")
+		}
+		return api.Result(q.RequestID, o)
 	case "status":
 		blocks, err := m.Store.Blocks()
 		if err != nil {
@@ -288,7 +391,7 @@ func (m *Modern) read(q api.Request) api.Response {
 			next = b.ID
 		}
 		blocks = page
-		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": allCapabilities(), "contract_version": ContractVersion, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": m.s.cfg.HoldersState != ""})
+		v := api.Result(q.RequestID, map[string]any{"host_id": m.Store.Host, "protocol": "continuum.local-alpha.1", "capabilities": m.capabilities(), "contract_version": ContractVersion, "blocks": blocks, "total": total, "active": active, "truncated": more, "next_cursor": next, "capture_degraded": m.degraded.Load(), "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "process_restart_survival": m.s.cfg.HoldersState != ""})
 		return v
 	case "events":
 		p, err := m.Store.Read(q.After, q.Block)
@@ -317,7 +420,7 @@ func (m *Modern) mutate(q api.Request) api.Response {
 		return api.Error(q.RequestID, "invalid_request", code, msg, "help")
 	}
 	switch q.Operation {
-	case "open", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire":
+	case "open", "acquire", "takeover", "renew", "release", "input", "resize", "stop", "purge", "retire", "prompt_wait", "permission_respond":
 	default:
 		return api.Error(q.RequestID, "unsupported", "operation", "unsupported operation", "help")
 	}
@@ -360,6 +463,15 @@ func (m *Modern) mutate(q api.Request) api.Response {
 			return bad("block_id", "block_id required")
 		}
 	}
+	if q.Operation == "prompt_wait" && (q.Wait == nil || !validWaitSpec(q.Wait)) {
+		return bad("wait_spec", "prompt requires a valid wait")
+	}
+	if q.Operation != "prompt_wait" && (q.Wait != nil || q.Text != "") {
+		return bad("wait_fields", "wait and text only apply to prompt_wait")
+	}
+	if q.Operation != "permission_respond" && (q.PermissionID != "" || q.Outcome != "" || q.OptionID != "") {
+		return bad("permission_fields", "permission fields only apply to permission_respond")
+	}
 	if q.Operation == "resize" && (q.Cols < 1 || q.Cols > 1000 || q.Rows < 1 || q.Rows > 1000) {
 		return bad("size", "columns and rows must be between 1 and 1000")
 	}
@@ -395,7 +507,7 @@ func (m *Modern) mutate(q api.Request) api.Response {
 	}
 	if old == nil {
 		// A request that cannot have an effect never occupies the ledger.
-		requiresRunning := q.Operation == "acquire" || q.Operation == "takeover" || q.Operation == "renew" || q.Operation == "release" || q.Operation == "input" || q.Operation == "resize" || q.Operation == "stop"
+		requiresRunning := q.Operation == "acquire" || q.Operation == "takeover" || q.Operation == "renew" || q.Operation == "release" || q.Operation == "input" || q.Operation == "resize" || q.Operation == "stop" || q.Operation == "prompt_wait" || q.Operation == "permission_respond"
 		if requiresRunning && m.s.entry(q.Block) == nil {
 			return api.Error(q.RequestID, "conflict", "not_running", "block has no running process", "status")
 		}
@@ -532,6 +644,12 @@ func (m *Modern) effect(q api.Request) api.Response {
 	if q.Operation == "stop" {
 		m.s.killEntry(q.Block)
 		return api.Result(q.RequestID, map[string]any{"accepted": true})
+	}
+	if q.Operation == "prompt_wait" {
+		return m.promptWaitEffect(q, e)
+	}
+	if q.Operation == "permission_respond" {
+		return m.permissionRespondEffect(q, e)
 	}
 	sess := m.s.entrySess(e)
 	if sess == nil {

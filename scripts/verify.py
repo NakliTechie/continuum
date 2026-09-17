@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy|upgrade|remote|streams]. No live endpoint reuse."""
+"""Worktree-safe verifier: doctor | verify [core|cli|terminal|legacy|upgrade|remote|streams|managed|real-acp]. No live endpoint reuse."""
 import argparse
 import json
 import os
@@ -37,7 +37,7 @@ def stray_go_dirs():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['doctor', 'verify'])
-    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams'])
+    p.add_argument('feature', nargs='?', choices=['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams', 'managed', 'real-acp'])
     opts = p.parse_args()
     missing = [name for name in ['go', 'git', 'python3'] if not shutil.which(name)]
     if missing:
@@ -58,7 +58,7 @@ def main():
             report['stray_go_dirs'] = stray
         print(json.dumps(report))
         return
-    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams']
+    features = [opts.feature] if opts.feature else ['core', 'cli', 'terminal', 'legacy', 'upgrade', 'remote', 'streams', 'managed']
     with tempfile.TemporaryDirectory(prefix='continuum-verify-') as directory:
         temp = Path(directory)
         home, tmp = temp / 'home', temp / 'tmp'
@@ -111,6 +111,15 @@ def main():
             binary = temp / 'continuum-streams'
             run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
             run(['python3', 'scripts/check_streams.py', '--binary', str(binary)], env=env)
+        if 'managed' in features:
+            binary = temp / 'continuum-managed'
+            run(['go', 'build', '-o', str(binary), './cmd/continuum'], env=env)
+            run(['python3', 'scripts/check_workspace.py', '--binary', str(binary)], env=env)
+        if 'real-acp' in features:
+            if not env.get('CONTINUUM_REAL_MODEL', '').startswith('ollama/'):
+                raise SystemExit('Set CONTINUUM_REAL_MODEL=ollama/<installed-local-model> for the opt-in ACP check.')
+            run(['go', 'test', '-count=1', '-timeout=180s', './internal/acp',
+                 '-run', '^TestRealLocalOmpACP$'], env=dict(env, CONTINUUM_REAL_ACP='1'))
     print(json.dumps({'class': 'ok', 'check': 'verify', 'features': features, 'checkout': str(ROOT)}))
 
 if __name__ == '__main__':

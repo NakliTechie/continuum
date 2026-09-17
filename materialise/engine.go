@@ -61,6 +61,10 @@ func New(prov *workspace.Provisioner) *Engine {
 // allocated ports are reused, commands whose cache_key is unchanged are skipped,
 // and services already up are left alone.
 func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
+	return e.run(spec, repoRoot, name, nil)
+}
+
+func (e *Engine) run(spec *fleet.Spec, repoRoot, name string, provisioned *workspace.Record) (*Result, error) {
 	if issues := fleet.Validate(spec); len(issues) > 0 {
 		return nil, fmt.Errorf("spec is invalid: %s", issues[0].Error())
 	}
@@ -98,6 +102,8 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	var err error
 	if e.DryRun {
 		rec = dryRecord(spec, repoRoot, name, e.Prov.Root)
+	} else if provisioned != nil {
+		rec = provisioned
 	} else if rec, err = e.Prov.Provision(spec, repoRoot, name); err != nil {
 		return nil, err
 	}
@@ -198,8 +204,8 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 				// at `materialising`, which is neither ready nor honestly unhealthy.
 				// A failed start hook is a failed materialisation, reported the same
 				// way a failed probe is.
-				step.Reason = err.Error()
-				res.Failed = append(res.Failed, "hooks.on_start: "+err.Error())
+				step.Reason = "hook failed; inspect private operator logs"
+				res.Failed = append(res.Failed, "hooks.on_start failed")
 			} else if !e.DryRun {
 				// Stamped only on success, so a hook that failed is retried next pass.
 				_ = e.Prov.MarkStarted(name)
@@ -212,9 +218,17 @@ func (e *Engine) Run(spec *fleet.Spec, repoRoot, name string) (*Result, error) {
 	reason := ""
 	if len(res.Failed) > 0 {
 		res.State = workspace.StateUnhealthy
-		reason = res.Failed[0]
+		reason = "health: probe failed"
+		if strings.HasPrefix(res.Failed[0], supervisionReason) || strings.HasPrefix(res.Failed[0], "hooks.") {
+			reason = res.Failed[0]
+		}
 	}
 	if !e.DryRun {
+		if len(res.Failed) == 0 && !alreadyStarted {
+			if err := e.Prov.MarkStarted(name); err != nil {
+				return fail("hooks.start_stamp", err)
+			}
+		}
 		_ = e.Prov.SetStateReason(name, res.State, reason)
 		// Re-read: `rec` is a pre-run snapshot, so without this the result reports
 		// the state the workspace was in BEFORE the run — a just-materialised
@@ -616,11 +630,9 @@ func (e *Engine) superviseService(sv fleet.Service, rec *workspace.Record, settl
 // Supervise re-checks every supervised service in the spec and records the
 // resulting state.
 //
-// NOTHING CALLS THIS YET outside tests: the supervision cadence lands in C5 with
-// the teardown executor. Until then a service that dies is caught only by the
-// check inside a materialise pass, not between passes. Said plainly here for the
-// same reason hooks.on_stop says it — a promise the code does not keep is worse
-// than an absent feature. When it is wired, the caller decides the cadence: a workspace that was ready and whose service has since
+// The managed-workspace cadence uses the same check and may restart within a
+// persisted budget; this one-shot method remains useful to explicit callers.
+// A workspace that was ready and whose service has since
 // died must stop reading ready — and one that was marked unhealthy by this very
 // check must be able to read ready again once the service answers, or the first
 // blip would condemn it forever.

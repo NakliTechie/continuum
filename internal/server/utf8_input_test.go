@@ -55,9 +55,12 @@ func TestMultibyteInputReachesAnInteractiveShellIntact(t *testing.T) {
 			b, _ := base64.StdEncoding.DecodeString(p.Data)
 			seen.Write(b)
 		}
-		// The echoed result line, unquoted, on a line of its own.
-		if strings.Contains(seen.String(), "\r\nleft… right\r\n") {
-			return
+		// The result must be an unquoted line of its own. PTYs emit both CRLF
+		// and bare CR around readline's bracketed-paste mode on Linux.
+		for _, line := range strings.FieldsFunc(seen.String(), func(r rune) bool { return r == '\r' || r == '\n' }) {
+			if line == "left… right" {
+				return
+			}
 		}
 		time.Sleep(30 * time.Millisecond)
 	}

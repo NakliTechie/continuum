@@ -13,7 +13,20 @@ import (
 // deadline rather than failing on the first attempt.
 type HTTPProber struct{}
 
+// StrictHTTPProber is used by the opt-in managed path. An HTTP 404 is a
+// responding server, but not a healthy declared endpoint. The one-shot legacy
+// path retains its established below-500 behavior for compatibility.
+type StrictHTTPProber struct{}
+
+func (StrictHTTPProber) HTTP(url string, timeout time.Duration) error {
+	return probeHTTP(url, timeout, true)
+}
+
 func (HTTPProber) HTTP(url string, timeout time.Duration) error {
+	return probeHTTP(url, timeout, false)
+}
+
+func probeHTTP(url string, timeout time.Duration, strict bool) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 5 * time.Second}
 	var last error
@@ -28,7 +41,7 @@ func (HTTPProber) HTTP(url string, timeout time.Duration) error {
 		cancel()
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode < 500 {
+			if (!strict && resp.StatusCode < 500) || (strict && resp.StatusCode >= 200 && resp.StatusCode < 400) {
 				return nil
 			}
 			last = fmt.Errorf("%s answered %d", url, resp.StatusCode)

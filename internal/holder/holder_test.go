@@ -132,8 +132,27 @@ func TestChildSurvivesDetachAndResumesContiguously(t *testing.T) {
 			t.Fatalf("ticks not contiguous across detach at index %d: %v", i, nums[:min(len(nums), i+3)])
 		}
 	}
+	// The holder's decoded stream is an unbuffered pipe. A real daemon keeps
+	// draining it until exit; if this test stops reading before Wait, decode can
+	// block on one final output frame and never reach the exit frame on Linux.
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, b.Output)
+		close(drained)
+	}()
 	_ = unix.Kill(-pid, unix.SIGKILL)
-	b.Wait()
+	exited := make(chan int, 1)
+	go func() { exited <- b.Wait() }()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder did not report exit while output was drained")
+	}
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder output did not close after exit")
+	}
 }
 
 func TestExitWhileDetachedLeavesARecordWithTail(t *testing.T) {

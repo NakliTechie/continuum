@@ -1,7 +1,9 @@
 package pty
 
 import (
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -84,15 +86,14 @@ func TestAuditKillDescendants(t *testing.T) {
 	case <-done:
 	case <-time.After(15 * time.Second):
 	}
-	// Poll until the descendant is actually gone (ESRCH) rather than checking
-	// once. A single-shot probe races the kernel's asynchronous reaping and
-	// produced false RED results in the whole-project gate under load; a
-	// generous bounded loop removes the timing dependency without hanging a
-	// genuinely stuck reap.
+	// Poll until the descendant is no longer executing. A single-shot probe
+	// races the kernel's asynchronous reaping. In a container without an init
+	// reaper, a killed orphan may remain a zombie indefinitely: kill(pid, 0)
+	// succeeds for that already-dead process, so Linux also checks its state.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if err := syscall.Kill(pid, 0); err != nil {
-			break // ESRCH: the descendant has exited and been reaped
+		if !descendantExecuting(pid) {
+			break
 		}
 		if !time.Now().Before(deadline) {
 			t.Errorf("descendant %d remains alive after Kill", pid)
@@ -100,6 +101,24 @@ func TestAuditKillDescendants(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func descendantExecuting(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false // ESRCH: exited and reaped
+	}
+	if runtime.GOOS == "linux" {
+		stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if os.IsNotExist(err) {
+			return false
+		}
+		if err == nil {
+			if end := strings.LastIndex(string(stat), ") "); end >= 0 && end+2 < len(stat) {
+				return stat[end+2] != 'Z' && stat[end+2] != 'X'
+			}
+		}
+	}
+	return true
 }
 
 // The kernel takes a uint16 winsize; unbounded values wrap (65536 becomes a

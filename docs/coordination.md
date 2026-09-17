@@ -23,7 +23,11 @@ observed matching completions receive coordinator commit order; this is not a
 global physical clock. Replays return the same winner and order after restart.
 An unexpected exit is distinct from satisfaction. Unreachable members remain
 pending with explicit transport state until reconnect/deadline, not fabricated
-completion. Revoked access, changed host identity and unsupported capability fail
+completion. Admission requires an initial atomic observation/cursor from every
+source; a source unreachable before that boundary makes creation return
+`unreachable` without committing a wait, because replay from cursor zero could
+mistake an older transient event for new completion. Revoked access, changed
+host identity and unsupported capability fail
 closed. Interrupted targets and capture degradation are not successful results.
 
 Waits are bounded: 64 pending, 1024 retained, eight members each, deadline at most

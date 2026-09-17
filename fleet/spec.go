@@ -59,11 +59,9 @@ type Materialise struct {
 // Hooks run at workspace lifecycle transitions. on_start runs after a successful
 // materialise.
 //
-// on_stop and on_destroy are DECLARED but not yet executed: the teardown
-// executor lands in C5, and until it does, nothing runs them. Validating and
-// documenting a field that silently does nothing is how an author's on_destroy
-// volume cleanup passes review and never runs, so it is said plainly here rather
-// than implied by the schema.
+// on_stop and on_destroy execute only through the opt-in, hash-trusted managed
+// workspace path. The one-shot legacy materialise command still does not run
+// them; a declared hook is not an implicit daemon service.
 type Hooks struct {
 	OnStart   string `json:"on_start,omitempty"`
 	OnStop    string `json:"on_stop,omitempty"`
@@ -99,14 +97,10 @@ type Service struct {
 	Name    string `json:"name"`
 	Run     string `json:"run"`
 	PortVar string `json:"port_var,omitempty"`
-	// Supervise re-checks the service after its health probe passed, during each
-	// materialise pass. A probe is a moment, not a guarantee.
-	//
-	// It is NOT yet continuous: nothing polls between passes, because
-	// Engine.Supervise has no caller until C5 wires a cadence. A service that dies
-	// between passes is therefore not noticed until the next materialise. Said
-	// plainly because a promise the code does not keep is worse than an absent
-	// feature. Supervision needs something concrete to check, so it requires
+	// Supervise re-checks the service during materialisation. The opt-in managed
+	// path also checks on the owning daemon's 10-second cadence with a persisted
+	// three-attempt restart budget and explicit resume after daemon restart.
+	// Supervision needs something concrete to check, so it requires
 	// PortVar — and PortVar must name an allocated port, not merely an
 	// interpolatable name.
 	Supervise bool `json:"supervise,omitempty"`
@@ -123,10 +117,8 @@ type Probe struct {
 // Teardown reverses materialisation. KeepBranch defaults to false only when the
 // block is present and says so; a missing Teardown keeps the branch.
 //
-// DECLARED but not yet executed, like hooks.on_stop/on_destroy: no code in this
-// module runs teardown.commands or acts on keep_branch until the teardown
-// executor lands (C5). A `docker compose down -v` written here passes review
-// and does nothing, so the gap is stated rather than left to be discovered.
+// Executed only by explicit managed-workspace destroy, after stop and before
+// on_destroy. The one-shot legacy materialise path does not execute teardown.
 type Teardown struct {
 	Commands   []string `json:"commands,omitempty"`
 	KeepBranch bool     `json:"keep_branch,omitempty"`

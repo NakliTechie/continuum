@@ -50,6 +50,20 @@ func New(home string) *Provisioner {
 // the repository at repoRoot. It is safe to call twice: an existing record is
 // reused rather than duplicated, which is what makes recovery cheap (D3).
 func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Record, error) {
+	return p.provision(spec, repoRoot, name, "", "")
+}
+
+// ProvisionManaged binds the reviewed spec identity in the same locked record
+// update as ports and variables. A rejected new hash cannot partially replace
+// the live inputs of an older managed workspace.
+func (p *Provisioner) ProvisionManaged(spec *fleet.Spec, repoRoot, name, specPath, hash string) (*Record, error) {
+	if specPath == "" || hash == "" {
+		return nil, fmt.Errorf("managed spec path and hash required")
+	}
+	return p.provision(spec, repoRoot, name, specPath, hash)
+}
+
+func (p *Provisioner) provision(spec *fleet.Spec, repoRoot, name, specPath, hash string) (*Record, error) {
 	if issues := fleet.Validate(spec); len(issues) > 0 {
 		return nil, fmt.Errorf("spec is invalid: %s", issues[0].Error())
 	}
@@ -67,6 +81,9 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			return err
 		}
 		existing := rs.Workspaces[name]
+		if existing != nil && existing.ManagedHash != "" && (existing.ManagedHash != hash || existing.ManagedSpec != specPath) {
+			return fmt.Errorf("workspace %q is bound to a different managed spec; stop and reconcile it before changing source", name)
+		}
 		if existing != nil && (!sameWorktreePath(existing.Repo, repoRoot) || existing.Branch != branch || !sameWorktreePath(existing.Path, path)) {
 			return fmt.Errorf("workspace %q already belongs to a different repository, branch or path", name)
 		}
@@ -118,6 +135,18 @@ func (p *Provisioner) Provision(spec *fleet.Spec, repoRoot, name string) (*Recor
 			rec.State = existing.State
 			rec.Reason = existing.Reason
 			rec.StartedAt = existing.StartedAt
+			rec.StoppedAt = existing.StoppedAt
+			rec.ManagedSpec = existing.ManagedSpec
+			rec.ManagedHash = existing.ManagedHash
+			rec.ManagedArmed = existing.ManagedArmed
+			rec.RestartCount = existing.RestartCount
+			rec.NextRestart = existing.NextRestart
+			rec.LifecycleIntent = existing.LifecycleIntent
+			rec.TeardownIndex = existing.TeardownIndex
+			rec.DestroyHookDone = existing.DestroyHookDone
+		}
+		if hash != "" {
+			rec.ManagedSpec, rec.ManagedHash, rec.ManagedArmed = specPath, hash, true
 		}
 		rs.Workspaces[name] = rec
 		if err := saveRecords(p.Home, rs); err != nil {

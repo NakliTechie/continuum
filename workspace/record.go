@@ -29,9 +29,18 @@ type Record struct {
 	// hook is gated on this rather than on the workspace's state, because
 	// supervision can promote a workspace to ready without ever starting it —
 	// gating on state meant a recovered workspace skipped on_start forever.
-	StartedAt string `json:"started_at,omitempty"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	StartedAt       string            `json:"started_at,omitempty"`
+	StoppedAt       string            `json:"stopped_at,omitempty"`
+	ManagedSpec     string            `json:"managed_spec,omitempty"`
+	ManagedHash     string            `json:"managed_hash,omitempty"`
+	ManagedArmed    bool              `json:"managed_armed,omitempty"`
+	RestartCount    map[string]int    `json:"restart_count,omitempty"`
+	NextRestart     map[string]string `json:"next_restart,omitempty"`
+	LifecycleIntent string            `json:"lifecycle_intent,omitempty"`
+	TeardownIndex   int               `json:"teardown_index,omitempty"`
+	DestroyHookDone bool              `json:"destroy_hook_done,omitempty"`
+	CreatedAt       string            `json:"created_at"`
+	UpdatedAt       string            `json:"updated_at"`
 }
 
 // States a workspace can be in. `unhealthy` is deliberately distinct from
@@ -41,6 +50,8 @@ const (
 	StateMaterialising = "materialising"
 	StateReady         = "ready"
 	StateUnhealthy     = "unhealthy"
+	StateStopped       = "stopped"
+	StateDestroying    = "destroying"
 )
 
 type recordSet struct {

@@ -37,7 +37,7 @@ Choose retention when opening a block, then manage it explicitly:
 ./bin/continuum compact                     # stop the daemon first
 ```
 
-`serve` writes private credentials and a `v1.sock` under your config dir and opens a loopback port for Menagerie only. Use `--state /abs/path` to isolate a workspace; `continuum help` lists every command. Never put this alpha on a public listener.
+`serve` writes private credentials and a `v1.sock` under your config dir and opens a loopback port for Menagerie and a read-only `/observer` doorway. Use `--state /abs/path` to isolate a workspace; `continuum help` lists every command. Never put this alpha on a public listener.
 
 To run it always-on (launchd on macOS, systemd `--user` on Linux) under its own service label, separate from any installed `menagerie-relay`:
 
@@ -71,7 +71,8 @@ continuum open --host user@host --state /remote/state --cwd /remote/workspace --
 Daemon bearer tokens remain on the owning host. Browsing is operator-only, defaults off,
 and does not change execution authority. Browse roots currently require `serve`
 (service-unit persistence is not implemented). Remote calls use one SSH process
-per request; real-network performance and fault testing remain outstanding.
+per request. An isolated two-host fault/restart check ran over the existing
+trusted Studio SSH path; wider network performance remains unmeasured.
 See [the directory/SSH contract](docs/remote-directories.md).
 
 ## Compose block streams (experimental)
@@ -90,9 +91,40 @@ commands. These controls affect the observer only, never the workload. Sources u
 observer credentials by default. See [stream limits, control replies and Nushell
 usage](docs/streams.md).
 
+## Durable waits and managed workspaces (experimental)
+
+`continuum wait` coordinates bounded any/all lifecycle conditions across local
+blocks and explicitly pinned SSH peers. A wait is durable after its initial
+source observation, can be read with `output` or `attach`, and has explicit
+deadline/cancel results. It never stops or approves a source implicitly. See
+[the coordination contract](docs/coordination.md).
+
+`continuum workspace plan` previews a fleet spec without shell effects;
+`workspace run` requires `--trust` with its exact source-byte hash before
+repository-authored shell runs. `workspace status`, `stop` and `destroy` expose
+supervision and explicit teardown. Managed supervised services require a stop
+hook and a non-answering declared port before destroy. See
+[the lifecycle limits](docs/workspace-lifecycle.md).
+
+## Scoped access and recovery (experimental)
+
+`continuum access` creates show-once per-block observer/controller/moderator
+grants, changes block sharing, revokes grants and reads the bounded audit. The
+browser doorway accepts observer credentials only; the root operator token is
+never accepted there. `continuum backup` creates or restores a checked offline
+state backup. Keep grant files private and run recovery with the daemon stopped.
+See [the access and operations contract](docs/access-operations.md).
+
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH-bridge compatibility and stream composition). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. Not yet done: structured-session (ACP) restart survival, native Linux, real-network remote and broader real-provider validation.
+Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition and managed headless cycle). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. Still open: structured-session (ACP) process survival across daemon restart, Menagerie client CU1–CU7, broad provider/platform validation and untrusted multi-user hosting.
+
+Tested on 2026-09-17: macOS/arm64 full isolated gate; Linux/arm64 Docker core
+race gate and headless managed cycle; two macOS hosts with one dropped SSH
+bridge request, an outage, coordinator restart and 2-second bridge latency;
+OMP 18 with local Ollama `qwen3.5:0.8b` over ACP. These are bounded checks,
+not a Linux systemd/service-install test, a lossy-WAN benchmark, or validation
+of cloud ACP providers. No installed relay was replaced or restarted.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions

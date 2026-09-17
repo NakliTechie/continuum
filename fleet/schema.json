@@ -209,7 +209,7 @@
             },
             "hooks": {
               "type": "object",
-              "description": "A lifecycle layer beside the six stages, not a seventh stage. on_start runs after a successful materialise. on_stop and on_destroy are declared for teardown but are NOT executed yet \u2014 the teardown executor lands in C5.",
+              "description": "A lifecycle layer beside the six stages, not a seventh stage. on_start runs after successful materialisation. on_stop and on_destroy run only through explicit hash-trusted managed-workspace operations; the legacy one-shot path does not execute them.",
               "properties": {
                 "on_start": {
                   "type": "string"
@@ -226,7 +226,7 @@
         },
         "teardown": {
           "type": "object",
-          "description": "DECLARED, NOT EXECUTED yet: nothing runs teardown.commands or acts on keep_branch until the teardown executor lands (C5), the same status as hooks.on_stop/on_destroy.",
+          "description": "Executed only by explicit hash-trusted managed-workspace destroy. The legacy one-shot path does not run teardown commands or remove the worktree.",
           "properties": {
             "commands": {
               "type": "array",

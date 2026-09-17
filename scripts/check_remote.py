@@ -98,7 +98,7 @@ sys.exit(result.returncode)
             start(local_state, home)
             remote_status = rpc('status')['result']
             assert remote_status['host_id'] != rpc('status', remote=False, selected=local_state)['result']['host_id']
-            assert rpc('contract')['result']['capabilities']['experimental'][-1] == 'directories_v1'
+            assert 'directories_v1' in rpc('contract')['result']['capabilities']['experimental']
             assert rpc('directories') == rpc('directories', remote=False)
             assert rpc('directories')['result']['roots'] == [str(browse)]
             assert rpc('directories', '--observer', code=3)['code'] == 'operator_required'

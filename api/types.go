@@ -7,23 +7,60 @@ import (
 )
 
 type Request struct {
-	Path           string   `json:"path,omitempty"`
-	Limit          int      `json:"limit,omitempty"`
-	Cursor         string   `json:"cursor,omitempty"`
-	Terminal       string   `json:"terminal,omitempty"`
-	Operation      string   `json:"operation"`
-	RequestID      string   `json:"request_id,omitempty"`
-	Block          string   `json:"block_id,omitempty"`
-	Args           []string `json:"args,omitempty"`
-	Cwd            string   `json:"cwd,omitempty"`
-	Encoding       string   `json:"encoding,omitempty"`
-	Data           string   `json:"data,omitempty"`
-	Lease          string   `json:"lease,omitempty"`
-	After          uint64   `json:"after,omitempty"`
-	Cols           int      `json:"cols,omitempty"`
-	Rows           int      `json:"rows,omitempty"`
-	Recording      string   `json:"recording,omitempty"`
-	RecordingLines int      `json:"recording_lines,omitempty"`
+	Grant          *GrantSpec `json:"grant,omitempty"`
+	GrantID        string     `json:"grant_id,omitempty"`
+	Sharing        string     `json:"sharing,omitempty"`
+	Peer           *Peer      `json:"peer,omitempty"`
+	PeerName       string     `json:"peer_name,omitempty"`
+	Wait           *WaitSpec  `json:"wait,omitempty"`
+	WaitID         string     `json:"wait_id,omitempty"`
+	Text           string     `json:"text,omitempty"`
+	PermissionID   string     `json:"permission_id,omitempty"`
+	Outcome        string     `json:"outcome,omitempty"`
+	OptionID       string     `json:"option_id,omitempty"`
+	Path           string     `json:"path,omitempty"`
+	Limit          int        `json:"limit,omitempty"`
+	Cursor         string     `json:"cursor,omitempty"`
+	Terminal       string     `json:"terminal,omitempty"`
+	Operation      string     `json:"operation"`
+	RequestID      string     `json:"request_id,omitempty"`
+	Block          string     `json:"block_id,omitempty"`
+	Args           []string   `json:"args,omitempty"`
+	Cwd            string     `json:"cwd,omitempty"`
+	Encoding       string     `json:"encoding,omitempty"`
+	Data           string     `json:"data,omitempty"`
+	Lease          string     `json:"lease,omitempty"`
+	After          uint64     `json:"after,omitempty"`
+	Cols           int        `json:"cols,omitempty"`
+	Rows           int        `json:"rows,omitempty"`
+	Recording      string     `json:"recording,omitempty"`
+	RecordingLines int        `json:"recording_lines,omitempty"`
+}
+
+// Waits are coordinator-owned observations. Peer names resolve through the
+// coordinator's private registry; a caller cannot supply an SSH destination.
+type WaitSource struct {
+	Name  string   `json:"name"`
+	Peer  string   `json:"peer"`
+	Block string   `json:"block_id"`
+	Until []string `json:"until"`
+}
+type WaitSpec struct {
+	Mode      string       `json:"mode"`
+	DeadlineS int          `json:"deadline_s"`
+	Sources   []WaitSource `json:"sources"`
+}
+type Peer struct {
+	Name   string `json:"name"`
+	Host   string `json:"host"`
+	State  string `json:"state"`
+	Binary string `json:"binary"`
+	HostID string `json:"host_id"`
+}
+
+type GrantSpec struct {
+	Class  string   `json:"class"`
+	Blocks []string `json:"blocks"`
 }
 type Action struct {
 	Kind      string `json:"kind"`

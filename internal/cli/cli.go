@@ -29,11 +29,15 @@ import (
 	"github.com/NakliTechie/continuum/internal/ipc"
 	"github.com/NakliTechie/continuum/internal/journal"
 	"github.com/NakliTechie/continuum/internal/server"
+	"github.com/NakliTechie/continuum/materialise"
+	"github.com/NakliTechie/continuum/workspace"
 	"github.com/charmbracelet/x/ansi"
 )
 
 // Version may be stamped with the source revision by local artifact builds.
 var Version = "0.1.0-alpha.2-dev"
+
+type credentialKey struct{}
 
 const help = `Continuum — work that outlives its clients
 
@@ -53,6 +57,10 @@ Commands:
   contract                 print the /v1 contract version and capabilities (--json for the full record)
   events --block ID        replay bounded recorded events; --follow keeps watching
   interleave --source JSON merge labelled block streams; --type TYPE filters; --control enables pause/continue
+  wait SUB                 durable any/all coordination and explicit SSH peers
+  workspace SUB            hash-trusted managed workspace lifecycle
+  access SUB               scoped grants, sharing and audit (root operator only)
+  backup SUB               offline checksum backup or recoverable restore
   export --block ID        write the block's output as an asciicast v3 recording to stdout
   purge --block ID         delete an exited block's output but keep lifecycle records
   retire --block ID        delete an exited block and all of its retained state
@@ -78,6 +86,7 @@ Browse: serve --browse-root ABSOLUTE_DIR (repeatable; disabled by default; opera
 Remote: --host USER@HOST --state REMOTE_ABSOLUTE_DIR [--remote-binary PATH].
 Uses existing non-interactive SSH trust; remote open requires an absolute --cwd.
 Observation: --observer uses the read-only observer credential.
+Scoped access: --grant-file ABSOLUTE_PRIVATE_FILE reads a show-once grant locally; never put the token in argv.
 Terminal: open --terminal screen-v1 [--cols N --rows N] -- COMMAND opts into server-owned screens.
 Recording: open --recording none|visible|lines:N|full (default full); visible requires screen-v1.
 Attach: --observer is read-only; --takeover explicitly replaces a controller.
@@ -175,6 +184,18 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	if args[0] == "interleave" {
 		return interleaveCLI(args[1:], in, out, diag)
 	}
+	if args[0] == "wait" {
+		return waitCLI(args[1:], out, diag)
+	}
+	if args[0] == "workspace" {
+		return workspaceCLI(args[1:], out, diag)
+	}
+	if args[0] == "access" {
+		return accessCLI(args[1:], out, diag)
+	}
+	if args[0] == "backup" {
+		return backupCLI(args[1:], out, diag)
+	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(diag)
@@ -200,6 +221,7 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	format := f.String("format", "asciicast", "export format: asciicast (v3)")
 	remoteHost := f.String("host", "", "SSH destination (existing host key and key authentication)")
 	remoteBinary := f.String("remote-binary", "continuum", "executable on the SSH host")
+	grantFile := f.String("grant-file", "", "private local file containing a scoped grant token")
 	directoryPath := f.String("path", "", "owning-host directory path")
 	pageLimit := f.Int("limit", 0, "directory page size, 1..200 (default 100)")
 	var browseRoots []string
@@ -236,6 +258,10 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 			fmt.Fprintln(diag, "--host is for client API operations only; service/serve/compact/rpc are local")
 			return false
 		}
+		if *grantFile != "" && (!filepath.IsAbs(*grantFile) || *remoteHost != "" || command == "serve" || command == "service" || command == "compact" || command == "rpc") {
+			fmt.Fprintln(diag, "--grant-file requires a local client operation and an absolute private file")
+			return false
+		}
 		if len(browseRoots) > 0 && command != "serve" || (set["path"] || set["limit"]) && command != "directories" {
 			fmt.Fprintln(diag, "--browse-root is for serve; --path and --limit are for directories")
 			return false
@@ -248,6 +274,9 @@ func Run(args []string, in io.Reader, out, diag io.Writer) int {
 	baseContext := context.Background()
 	if *remoteHost != "" {
 		baseContext = context.WithValue(baseContext, remoteKey{}, remoteTarget{*remoteHost, *remoteBinary})
+	}
+	if *grantFile != "" {
+		baseContext = context.WithValue(baseContext, credentialKey{}, *grantFile)
 	}
 	if !filepath.IsAbs(*state) {
 		fmt.Fprintln(diag, "--state must be an absolute directory")
@@ -633,7 +662,11 @@ func call(ctx context.Context, dir string, observer bool, q api.Request) api.Res
 	if observer {
 		name = "observer.token"
 	}
-	token, err := privateRead(filepath.Join(dir, name))
+	credentialPath := filepath.Join(dir, name)
+	if selected, ok := ctx.Value(credentialKey{}).(string); ok {
+		credentialPath = selected
+	}
+	token, err := privateRead(credentialPath)
 	if err != nil {
 		return api.Error(q.RequestID, "access_denied", "credential", "could not read private credential", "help")
 	}
@@ -750,6 +783,37 @@ func serve(dir, addr, origin, adoptRelay string, diag io.Writer, browseRoots ...
 	cfg.ResolveAgents(nil)
 	srv := server.New(cfg)
 	modern := srv.EnableModern(store, observer)
+	modern.StartWaits(dir, func(ctx context.Context, p api.Peer, q api.Request) api.Response {
+		if p.Host == "" {
+			return call(ctx, p.State, true, q)
+		}
+		ctx = context.WithValue(ctx, remoteKey{}, remoteTarget{host: p.Host, binary: p.Binary})
+		return call(ctx, p.State, true, q)
+	})
+	defer modern.StopWaits()
+	managed := materialise.New(workspace.New(dir))
+	if err := managed.Prov.SuspendManaged(); err != nil {
+		return fmt.Errorf("suspend managed workspaces: %w", err)
+	}
+	managedCtx, stopManaged := context.WithCancel(context.Background())
+	var managedDone sync.WaitGroup
+	managedDone.Add(1)
+	go func() {
+		defer managedDone.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-managedCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := managed.TickManaged(); err != nil {
+				fmt.Fprintln(diag, "managed workspace check failed; inspect private state")
+			}
+		}
+	}()
+	defer func() { stopManaged(); managedDone.Wait() }()
 	if err := modern.ConfigureDirectories(browseRoots); err != nil {
 		return err
 	}
@@ -774,11 +838,15 @@ func serve(dir, addr, origin, adoptRelay string, diag io.Writer, browseRoots ...
 	}
 	apiMux := http.NewServeMux()
 	apiMux.Handle("/v1", modern)
-	apiServer, legacyServer := timeouts(apiMux), timeouts(srv.Handler())
+	loopbackMux := http.NewServeMux()
+	loopbackMux.HandleFunc("/v1/observe", modern.BrowserRead)
+	loopbackMux.HandleFunc("/observer", modern.BrowserObserver)
+	loopbackMux.Handle("/", srv.Handler())
+	apiServer, legacyServer := timeouts(apiMux), timeouts(loopbackMux)
 	done := make(chan error, 2)
 	go func() { done <- apiServer.Serve(sock) }()
 	go func() { done <- legacyServer.Serve(ln) }()
-	fmt.Fprintf(diag, "Continuum %s ready\nAPI socket: %s\nLegacy WebSocket (Menagerie): ws://%s\nState: %s\nNext: %s\nCtrl-C stops this daemon and its processes.\n", Version, ipc.Path(dir), ln.Addr(), dir, clientCommand("status", dir, ""))
+	fmt.Fprintf(diag, "Continuum %s ready\nAPI socket: %s\nLegacy WebSocket (Menagerie): ws://%s\nRead-only browser: http://%s/observer\nState: %s\nNext: %s\nCtrl-C stops this daemon and its processes.\n", Version, ipc.Path(dir), ln.Addr(), ln.Addr(), dir, clientCommand("status", dir, ""))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	select {
@@ -788,6 +856,8 @@ func serve(dir, addr, origin, adoptRelay string, diag io.Writer, browseRoots ...
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	stopManaged()
+	managedDone.Wait()
 	srv.BeginShutdown()
 	_ = apiServer.Shutdown(shutdown)
 	_ = legacyServer.Shutdown(shutdown)
@@ -848,7 +918,7 @@ func parseRecording(v string) (string, int, error) {
 }
 
 func readOperation(op string) bool {
-	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export" || op == "directories"
+	return op == "status" || op == "version" || op == "events" || op == "screen" || op == "export" || op == "directories" || op == "observe" || op == "wait_get" || op == "wait_output"
 }
 
 // exportCast pages a block's journal and writes an asciicast v3 stream. It is a

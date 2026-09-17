@@ -98,6 +98,27 @@ these same envelopes without exposing a new API listener or sending daemon beare
 to the client. See [remote-directories.md](remote-directories.md) for authority,
 confinement, limits, error classes and transport behavior.
 
+`waits_v1` adds coordinator-owned `observe`, `wait_create`, `wait_get`,
+`wait_output`, `wait_cancel`, `peer_add`, `peer_remove`, `peer_list`,
+`prompt_wait` and `permission_respond`. `wait_output` returns a typed
+`wait_not_ready` conflict until terminal; `wait_get` never blocks, while the
+CLI's `wait attach` polls it and does not cancel on disconnect. Peer
+registration pins the remote host ID over existing trusted SSH. ACP prompt
+and permission effects still require the block's current control lease.
+See [coordination.md](coordination.md).
+
+`access_grants_v1` adds root-only `grant_create`, `grant_revoke`, `grant_list`,
+`share_set`, `share_get`, and `audit_list`. A grant token is returned only once,
+stored as a hash, scoped to explicit blocks, and checked against each block's
+private/observers/controllers policy on every request. Controller and moderator
+classes can use only their allowed block-control operations; moderator alone
+may take over. The loopback `/v1/observe` browser doorway is read-only and
+never accepts the root operator token. See [access-operations.md](access-operations.md).
+
+`continuum workspace` and `continuum backup` are offline/host-local CLI
+commands, not `/v1` operations. Managed workspace shell authority is tied to
+an exact source-byte spec hash; see [workspace-lifecycle.md](workspace-lifecycle.md).
+
 ## Not covered by this contract
 
 The legacy Menagerie WebSocket wire protocol (its own `protocol/protocol.md`

@@ -64,6 +64,8 @@ type Store struct {
 	MaxOperations int
 }
 type Block struct {
+	Lifecycle         string `json:"lifecycle,omitempty"`
+	Turn              uint64 `json:"turn,omitempty"`
 	HistoryIncomplete bool   `json:"history_incomplete"`
 	ID                string `json:"id"`
 	Agent             string `json:"agent"`
@@ -870,14 +872,28 @@ func (s *Store) appendBounded(id, kind string, payload any, limit, outLen int) e
 		if err := enforceRetention(tx, s.MaxEvents, s.MaxBytes); err != nil {
 			return err
 		}
-		if kind == "exited" {
+		if Lifecycle(kind) {
 			blocks := tx.Bucket([]byte("blocks"))
 			if v := blocks.Get([]byte(id)); v != nil {
 				var block Block
 				if err := json.Unmarshal(v, &block); err != nil {
 					return err
 				}
-				block.State = "exited"
+				block.Lifecycle = kind
+				var detail struct {
+					Turn uint64 `json:"turn"`
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					return err
+				}
+				if err := json.Unmarshal(raw, &detail); err != nil {
+					return err
+				}
+				block.Turn = detail.Turn
+				if kind == "exited" {
+					block.State = "exited"
+				}
 				v, _ = json.Marshal(block)
 				return blocks.Put([]byte(id), v)
 			}
