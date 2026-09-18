@@ -34,7 +34,7 @@ continuum service install --listen 127.0.0.1:7878
 continuum service status
 ```
 
-Already running `menagerie-relay`? `continuum service cutover --adopt-relay ~/.menagerie/relay.toml` replaces it in place — same port, token, origins and agents.
+Already running `menagerie-relay`? `continuum service cutover --adopt-relay ~/.menagerie/relay.toml` replaces it in place — same port, token, origins and agents. The unit embeds the absolute path of the binary that installed it, so after `brew upgrade continuum` run `service install` again.
 
 ## With Menagerie
 
