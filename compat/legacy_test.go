@@ -295,7 +295,13 @@ func TestPTYReattachAndLegacyTakeover(t *testing.T) {
 		t.Fatal("legacy attach did not rotate the token")
 	}
 	send(t, c, frame{"type": "input", "session_id": id, "session_token": old, "data": "x"})
+	// A newer relay first tells the displaced client `session_taken` (additive,
+	// protocol 1.3 addendum); the baseline says nothing. Either way the old
+	// token must be refused.
 	denied := until(t, c, func(f frame) bool { return f["type"] == "error" })
+	if denied["code"] == "session_taken" {
+		denied = until(t, c, func(f frame) bool { return f["type"] == "error" })
+	}
 	if denied["code"] != "invalid_token" {
 		t.Fatal("old token still controls session")
 	}

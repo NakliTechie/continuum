@@ -372,6 +372,19 @@ func (s *Server) detach(cn *conn) {
 	}
 }
 
+// displaceSubscriber makes cn the session's only subscriber. The legacy door
+// streams to one client per session and attach reissues the token, so the
+// client it replaces would otherwise go silent with a dead token and no signal;
+// it is told, so it can show the handoff and offer a re-attach.
+func (s *Server) displaceSubscriber(e *sessionEntry, id string, cn *conn) {
+	prev := e.subscriber()
+	e.setSub(cn)
+	if prev == nil || prev == cn {
+		return
+	}
+	prev.sendError(id, protocol.ErrSessionTaken, "another client attached to this session; re-attach to view it here again")
+}
+
 // deliverOutput routes a session's output to its current subscriber.
 func (s *Server) deliverOutput(id string, seq int, b []byte) {
 	s.recordOutput(id, b, false)
@@ -1255,6 +1268,19 @@ func (e *sessionEntry) closeOutbox() {
 	close(e.outbox)
 }
 
+// replayedPermissionID returns the request_id of a tail frame that is a
+// permission_request, or "" for any other frame.
+func replayedPermissionID(b []byte) string {
+	var m struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(b, &m) != nil || m.Type != protocol.TypePermissionRequest {
+		return ""
+	}
+	return m.RequestID
+}
+
 // stampReplaySeq rewrites a frame's seq to -1 for re-attach replay — any frame
 // type carrying a seq (session_update, permission_request). Returns b unchanged
 // if it doesn't parse or has no seq.
@@ -1378,7 +1404,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			return
 		}
 		cn.srv.reissueToken(msg.SessionID, tok)
-		e.setSub(cn)
+		cn.srv.displaceSubscriber(e, msg.SessionID, cn)
 		_ = cn.send(protocol.Attached{
 			Type:         protocol.TypeAttached,
 			SessionID:    msg.SessionID,
@@ -1404,6 +1430,13 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 		}
 	replay:
 		for _, b := range e.tailSnapshot() {
+			// A permission request that was already answered is history, not a
+			// decision: replaying it would put an actionable card in front of the
+			// newcomer for a call the agent has moved past (second-client run,
+			// 2026-09-18). Only still-pending requests replay.
+			if id := replayedPermissionID(b); id != "" && !e.acp.HasPendingPermission(id) {
+				continue
+			}
 			// Replayed history carries seq -1 (the PTY-attach convention): clients
 			// render it but never re-persist it. Stamp every frame that has a seq —
 			// session_update AND permission_request — so a replayed prompt isn't
@@ -1452,7 +1485,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 		return
 	}
 	cn.srv.reissueToken(msg.SessionID, tok)
-	e.setSub(cn)
+	cn.srv.displaceSubscriber(e, msg.SessionID, cn)
 	_ = cn.send(protocol.Attached{
 		Type:         protocol.TypeAttached,
 		SessionID:    msg.SessionID,

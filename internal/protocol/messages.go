@@ -94,7 +94,10 @@ const (
 	// tool call its sender never saw. Inspect the pending request and answer it
 	// deliberately instead.
 	ErrSessionBlocked = "session_blocked"
-	ErrInvalidToken   = "invalid_token"
+	// ErrSessionTaken tells a session's previous subscriber that another client
+	// attached: its token is void and live frames now go to the newcomer.
+	ErrSessionTaken = "session_taken"
+	ErrInvalidToken = "invalid_token"
 )
 
 // Signal kinds.

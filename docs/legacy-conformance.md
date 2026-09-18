@@ -14,7 +14,7 @@ The baseline runner uses the existing local Menagerie Git object database, extra
 |---|---|
 | Authentication | Origin rejection, unregistered request rejection, wrong registration-token rejection; correct registration reaches session inventory. |
 | PTY detach/attach | Output produced with no attached client is replayed after reconnect; the same process remains controllable. |
-| Legacy takeover | A second attach issues a new token; input/control using the old token is rejected. This is compatibility behavior, not a multiple-observer feature. |
+| Legacy takeover | A second attach issues a new token; input/control using the old token is rejected, and the displaced client receives `error{session_taken}` so it can show the handoff and re-attach. This is compatibility behavior, not a multiple-observer feature. |
 | Atomic prompt + wait | A fake ACP turn resolves its same-frame wait to done, with the correct ID and no timeout. |
 | Attention | Another inventory read preserves done; explicit seen moves done to idle. |
 | Approval guard | While the fake ACP agent asks permission, a task prompt is refused with session_blocked; explicit permission response completes the turn. |

@@ -223,13 +223,24 @@ func TestCheckerWSStartupApprovalAndReconnect(t *testing.T) {
 			if attached.Type != "attached" {
 				t.Fatalf("reattach %+v", attached)
 			}
-			for i := 0; i < 7; i++ {
+			// Both startup permission requests were answered above, so the replay
+			// is the tail minus those two: history replays, answered decisions do not.
+			e := s.entry(spawn.SessionID)
+			expected := 0
+			for _, b := range e.tailSnapshot() {
+				if id := replayedPermissionID(b); id == "" || e.acp.HasPendingPermission(id) {
+					expected++
+				}
+			}
+			if expected != 5 {
+				t.Fatalf("expected 5 replayable frames in the tail, found %d", expected)
+			}
+			for i := 0; i < expected; i++ {
 				f := checkerRecv(t, c2)
-				if f.Seq != -1 || (f.Type != "session_update" && f.Type != "permission_request") {
+				if f.Seq != -1 || f.Type != "session_update" {
 					t.Fatalf("replay %+v", f)
 				}
 			}
-			e := s.entry(spawn.SessionID)
 			e.outMu.Lock()
 			total := 0
 			for _, b := range e.tail {
