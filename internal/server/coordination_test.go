@@ -169,6 +169,95 @@ func TestDurableWaitAllReplayCancelAndPeerPin(t *testing.T) {
 	}
 }
 
+func TestIncompleteHistoryMarksTheMemberAndKeepsWatching(t *testing.T) {
+	m, call := modernTest(t)
+	a, b, c := "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+	var remoteExited atomic.Bool
+	m.StartWaits(t.TempDir(), func(_ context.Context, _ api.Peer, q api.Request) api.Response {
+		switch q.Operation {
+		case "status":
+			return api.Result(q.RequestID, map[string]any{"host_id": "remote-host-1", "capabilities": []string{"waits_v1"}})
+		case "observe":
+			return api.Result(q.RequestID, journal.Observation{Host: "remote-host-1", Block: q.Block, State: "running", Cursor: 0, Incomplete: true})
+		case "events":
+			if q.Block == c {
+				return api.Error(q.RequestID, "indeterminate", "store_read", "unreadable", "status")
+			}
+			page := journal.Page{Incomplete: true}
+			if remoteExited.Load() {
+				page = journal.Page{First: 1, Last: 1, Next: 1, Incomplete: true, Events: []journal.Event{{Version: 1, Host: "remote-host-1", Block: b, Seq: 1, Type: "exited", Payload: json.RawMessage(`{"turn":0}`)}}}
+			}
+			v := api.Result(q.RequestID, page)
+			v.Class, v.Code = "indeterminate", "capture_degraded"
+			return v
+		}
+		return api.Error(q.RequestID, "unsupported", "operation", "unexpected", "help")
+	})
+	defer m.StopWaits()
+	if err := m.Store.AddBlock(journal.Block{ID: a, State: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Store.Append(a, "running", map[string]any{"turn": 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Store.MarkIncomplete(a); err != nil {
+		t.Fatal(err)
+	}
+	if v := call("operator", api.Request{Operation: "peer_add", RequestID: "pin-remote", Peer: &api.Peer{Name: "remote", Host: "user@known-host", State: "/tmp/remote", Binary: "/bin/continuum"}}); v.Class != "ok" {
+		t.Fatal(v)
+	}
+	sources := []api.WaitSource{{Name: "a", Peer: "local", Block: a, Until: []string{"exited"}}, {Name: "b", Peer: "remote", Block: b, Until: []string{"exited"}}}
+	r := waitState(t, call("operator", api.Request{Operation: "wait_create", RequestID: "degraded-all", Wait: &api.WaitSpec{Mode: "all", DeadlineS: 10, Sources: sources}}))
+	if r.State != "pending" {
+		t.Fatal("incomplete history refused admission", r)
+	}
+	for _, member := range r.Sources {
+		if member.History != "incomplete" || member.Code != "" {
+			t.Fatal("admission did not mark incomplete history", member)
+		}
+	}
+	time.Sleep(400 * time.Millisecond)
+	r = waitState(t, call("viewer", api.Request{Operation: "wait_get", WaitID: "degraded-all"}))
+	if r.State != "pending" {
+		t.Fatal("incomplete history without a transition changed the wait", r)
+	}
+	if err := m.Store.Append(a, "exited", map[string]any{"turn": 0}); err != nil {
+		t.Fatal(err)
+	}
+	remoteExited.Store(true)
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		r = waitState(t, call("viewer", api.Request{Operation: "wait_get", WaitID: "degraded-all"}))
+		if r.State != "pending" {
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	if r.State != "satisfied" || r.Code != "condition_met" {
+		t.Fatal("journaled exits after incomplete history did not satisfy the wait", r)
+	}
+	for _, member := range r.Sources {
+		if !member.Matched || member.History != "incomplete" {
+			t.Fatal("satisfied member lost its incomplete marker", member)
+		}
+	}
+	unreadable := waitState(t, call("operator", api.Request{Operation: "wait_create", RequestID: "unreadable-any", Wait: &api.WaitSpec{Mode: "any", DeadlineS: 10, Sources: []api.WaitSource{{Name: "c", Peer: "remote", Block: c, Until: []string{"exited"}}}}}))
+	if unreadable.State != "pending" {
+		t.Fatal(unreadable)
+	}
+	deadline = time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		unreadable = waitState(t, call("viewer", api.Request{Operation: "wait_get", WaitID: "unreadable-any"}))
+		if unreadable.State != "pending" {
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	if unreadable.State != "failed" || unreadable.Code != "source_failed" || unreadable.Sources[0].Code != "source_indeterminate" {
+		t.Fatal("an unreadable source was not an explicit failure", unreadable)
+	}
+}
+
 func TestPromptWaitBindsTheNewACPGeneration(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	store, err := journal.Open(state)

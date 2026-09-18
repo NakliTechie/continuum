@@ -28,7 +28,11 @@ source; a source unreachable before that boundary makes creation return
 `unreachable` without committing a wait, because replay from cursor zero could
 mistake an older transient event for new completion. Revoked access, changed
 host identity and unsupported capability fail
-closed. Interrupted targets and capture degradation are not successful results.
+closed. Interrupted targets are not successful results. Capture degradation
+(an unclean daemon epoch or a recording loss) marks the member
+`history: incomplete` and the wait keeps watching; only a later journaled,
+contiguous transition can satisfy it, never today's state. A cursor outside
+retained history (`history_gap`) still fails the source.
 
 Waits are bounded: 64 pending, 1024 retained, eight members each, deadline at most
 24 hours, one bounded event page per poll and at most eight concurrent peer reads.

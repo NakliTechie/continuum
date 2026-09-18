@@ -9,6 +9,7 @@ import shlex
 import signal
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -90,7 +91,7 @@ def stopped(host, pid, directory):
 
 def assert_wait(result, mode, names, winner=None):
     if result.get("state") != "satisfied" or result.get("mode") != mode or result.get("completion_order", 0) < 1:
-        raise RuntimeError(f"{mode} wait not durably satisfied: {result.get('state')}")
+        raise RuntimeError(f"{mode} wait not durably satisfied: {result.get('state')}: {json.dumps(result)}")
     members = result.get("sources", [])
     if {m.get("name") for m in members} != set(names):
         raise RuntimeError(f"{mode} wait lost a source")
@@ -259,6 +260,12 @@ def run(hosts, probe_count):
                 result = {"class": "ok", "check": "wan_multi_server", "hosts": 3, "cases": CASES,
                           "any_winner": any_result["winner"], "all_completion_order": all_result["completion_order"],
                           "application_probes": metrics, "injected_delay_ms": round(delay_seconds * 1000)}
+        except Exception:
+            log_path = root / "serve.log"
+            if log_path.exists():
+                print("coordinator serve.log tail:\n" + "\n".join(log_path.read_text(errors="replace").splitlines()[-40:]),
+                      file=sys.stderr)
+            raise
         finally:
             if coordinator is not None and coordinator.poll() is None:
                 coordinator.send_signal(signal.SIGTERM)

@@ -26,6 +26,7 @@ type waitMember struct {
 	Cursor    uint64 `json:"cursor"`
 	State     string `json:"state"`
 	Transport string `json:"transport,omitempty"`
+	History   string `json:"history,omitempty"`
 	Matched   bool   `json:"matched,omitempty"`
 	Order     uint64 `json:"completion_order,omitempty"`
 	Code      string `json:"code,omitempty"`
@@ -369,9 +370,10 @@ func (w *waitCoordinator) create(q api.Request) api.Response {
 			var o journal.Observation
 			if json.Unmarshal(v.Result, &o) != nil || o.Host != member.HostID || o.Block != s.Block || !journal.Lifecycle(o.State) {
 				member.Code = "invalid_observation"
-			} else if o.Incomplete {
-				member.Code = "capture_degraded"
 			} else {
+				if o.Incomplete {
+					member.History = "incomplete"
+				}
 				member.State, member.Cursor = o.State, o.Cursor
 				if q.Operation == "prompt_wait" {
 					member.MinTurn = o.Turn + 1
@@ -569,7 +571,10 @@ func (w *waitCoordinator) poll(id string, index int, key string) {
 		w.applyFailure(id, index, "history_gap")
 		return
 	}
-	if v.Class != "ok" {
+	// An incomplete recording still carries valid, contiguous lifecycle events;
+	// it is surfaced on the member, never turned into a fabricated failure.
+	degraded := v.Class == "indeterminate" && v.Code == "capture_degraded"
+	if v.Class != "ok" && !degraded {
 		w.applyFailure(id, index, "source_"+v.Class)
 		return
 	}
@@ -586,11 +591,8 @@ func (w *waitCoordinator) poll(id string, index int, key string) {
 		}
 		previous = e.Seq
 	}
-	if p.Incomplete {
-		w.applyFailure(id, index, "capture_degraded")
-		return
-	}
-	if p.Next != m.Cursor || m.Transport != "" {
+	incomplete := degraded || p.Incomplete
+	if p.Next != m.Cursor || m.Transport != "" || (incomplete && m.History == "") {
 		_ = w.m.Store.UpdateObject("waits", id, maxWaits, func(old json.RawMessage, seq uint64) (json.RawMessage, error) {
 			if old == nil {
 				return nil, journal.ErrNotFound
@@ -604,6 +606,9 @@ func (w *waitCoordinator) poll(id string, index int, key string) {
 			}
 			member := &latest.Sources[index]
 			member.Transport = ""
+			if incomplete {
+				member.History = "incomplete"
+			}
 			for _, e := range p.Events {
 				if e.Type == "acp_prompt_failed" {
 					var failure struct {
