@@ -2,140 +2,58 @@
 
 One Go daemon per machine that owns your terminals and coding agents — durable history, explicit control, a CLI — so work outlives the client that started it. The runtime under [Menagerie](https://github.com/NakliTechie/menagerie).
 
-Public alpha, AGPL-3.0. The `/v1` API is a versioned contract (`continuum/v1`, contract 1.0 — negotiate with `continuum contract`; see [docs/v1-contract.md](docs/v1-contract.md)). Runs always-on via `continuum service install`, or `continuum service cutover` to replace an installed `menagerie-relay` in place (adopting its port, token, origins and agents).
+Public alpha `0.1.0-alpha.2`, AGPL-3.0. macOS and Linux; one static binary.
 
-## What it does
-
-- **Work survives the client.** Close the tab, drop the network, `kill -9` the daemon — the process keeps running under a per-block holder, and the daemon re-adopts it on restart with the same block ID and PID. Any gap is marked, never hidden.
-- **Two doors, one core.** The same binary speaks Menagerie's legacy WebSocket (unchanged) and a versioned `/v1` contract on a private Unix socket — `continuum contract` reports the version and capabilities. One process manager, one journal, one lease model.
-- **Observe without stealing.** Many viewers can watch a block; control is a 60-second lease, explicit and revocable.
-- **Durable, honest history.** Choose `none`, a committed visible screen, the last N lines, or full raw output per block; lifecycle records remain durable. Retention limits, purge, and capture failures are explicit. Export retained output as asciicast v3.
-
-## Quick start
-
-Requires Go 1.26.8.
+## Install
 
 ```sh
-go build -o bin/continuum ./cmd/continuum
-./bin/continuum serve              # leave this running
+brew install naklitechie/tap/continuum
 ```
 
-In another terminal:
+or the checked installer (downloads the release archive for your OS/arch, verifies `SHA256SUMS`, installs to `~/.local/bin`; read it first if you like — it is 40 lines):
 
 ```sh
-./bin/continuum open -- /bin/sh
-./bin/continuum status
-./bin/continuum events --block BLOCK_ID --follow --text
+curl -fsSL https://raw.githubusercontent.com/NakliTechie/continuum/main/scripts/install.sh | sh
 ```
 
-Choose retention when opening a block, then manage it explicitly:
+or from source with Go 1.26.8: `go build -o bin/continuum ./cmd/continuum`.
+
+## First run
 
 ```sh
-./bin/continuum open --recording lines:500 -- /bin/sh
-./bin/continuum purge --block BLOCK_ID      # exited blocks; keep lifecycle metadata
-./bin/continuum retire --block BLOCK_ID     # exited blocks only
-./bin/continuum compact                     # stop the daemon first
+continuum serve                 # leave this running; prints the Menagerie endpoint
+continuum open -- /bin/sh       # in another terminal
+continuum status
+continuum events --block BLOCK_ID --follow --text
 ```
 
-`serve` writes private credentials and a `v1.sock` under your config dir and opens a loopback port for Menagerie and a read-only `/observer` doorway. Use `--state /abs/path` to isolate a workspace; `continuum help` lists every command. Never put this alpha on a public listener.
-
-To run it always-on (launchd on macOS, systemd `--user` on Linux) under its own service label, separate from any installed `menagerie-relay`:
+Always-on (launchd on macOS, systemd `--user` on Linux):
 
 ```sh
-./bin/continuum service install --listen 127.0.0.1:58750   # fixed port so Menagerie can reconnect
-./bin/continuum service status
-./bin/continuum service uninstall
+continuum service install --listen 127.0.0.1:7878
+continuum service status
 ```
+
+Already running `menagerie-relay`? `continuum service cutover --adopt-relay ~/.menagerie/relay.toml` replaces it in place — same port, token, origins and agents.
 
 ## With Menagerie
 
-Point Menagerie's Add-relay form at the `ws://` address `serve` prints, using `operator.token` from the state directory. The `menagerie-relay` entry point and the `continuum legacy *` subcommands preserve Menagerie's existing configuration and semantics; an installed-service cutover is a separate, validated step.
+Add the `ws://` address `serve` prints as a relay in Menagerie, with `operator.token` from the state directory as the registration token. The same binary answers as `menagerie-relay` and as `continuum legacy …`, so an existing Menagerie setup keeps working.
 
-## SSH clients and scoped directory browsing (experimental)
+## What it does
 
-On the owning host, opt into browsing one or more roots when starting a foreground daemon:
+- **Work survives the client.** Close the tab, drop the network, `kill -9` the daemon: the process keeps running under a per-block holder and is re-adopted on restart. Gaps are marked, never hidden.
+- **Two doors, one core.** Menagerie's protocol and a versioned `/v1` contract (`continuum contract`) over one journal and one lease model.
+- **Observe without stealing.** Many viewers per block; control is a 60-second explicit lease.
+- **Honest history.** Per-block recording policy, explicit retention, replay from any cursor, asciicast export.
+- **Experimental:** SSH clients, composed streams, durable cross-host waits, managed workspaces, scoped grants — see the architecture doc.
 
-```sh
-continuum serve --state /absolute/state --browse-root /absolute/workspaces
-continuum directories --state /absolute/state --path /absolute/workspaces --limit 50
-```
+## Status
 
-With an existing trusted SSH host/key and Continuum on that host:
+Alpha. Structured (ACP) sessions do not survive a daemon restart yet; the gate has run on macOS/arm64, the WAN drill on two Linux/amd64 hosts, nothing yet on a Linux systemd install or an arm64 remote host. Details and what each check covers: [docs/architecture.md](docs/architecture.md#verification).
 
-```sh
-continuum directories --host user@host --state /remote/state
-continuum open --host user@host --state /remote/state --cwd /remote/workspace -- /bin/sh
-```
+## Docs
 
-`--remote-binary /absolute/path/to/continuum` selects a non-PATH installation.
-Daemon bearer tokens remain on the owning host. Browsing is operator-only, defaults off,
-and does not change execution authority. Browse roots currently require `serve`
-(service-unit persistence is not implemented). Remote calls use one SSH process
-per request. An isolated two-host fault/restart check ran over the existing
-trusted Studio SSH path; wider network performance remains unmeasured.
-See [the directory/SSH contract](docs/remote-directories.md).
-
-## Compose block streams (experimental)
-
-```sh
-continuum interleave \
-  --source '{"name":"build","state":"/absolute/state","block_id":"LOCAL_BLOCK_ID"}' \
-  --source '{"name":"tests","host":"user@host","state":"/remote/state","block_id":"REMOTE_BLOCK_ID"}' \
-  --type output
-```
-
-Replace the block IDs with full IDs from `open` or `status`. Output is source-labelled
-NDJSON with original payloads, per-source cursors and asciicast-shaped event triples.
-Add `--follow` for ongoing observation and `--control` for stdin pause/continue/cancel
-commands. These controls affect the observer only, never the workload. Sources use
-observer credentials by default. See [stream limits, control replies and Nushell
-usage](docs/streams.md).
-
-## Durable waits and managed workspaces (experimental)
-
-`continuum wait` coordinates bounded any/all lifecycle conditions across local
-blocks and explicitly pinned SSH peers. A wait is durable after its initial
-source observation, can be read with `output` or `attach`, and has explicit
-deadline/cancel results. It never stops or approves a source implicitly. See
-[the coordination contract](docs/coordination.md).
-
-`continuum workspace plan` previews a fleet spec without shell effects;
-`workspace run` requires `--trust` with its exact source-byte hash before
-repository-authored shell runs. `workspace status`, `stop` and `destroy` expose
-supervision and explicit teardown. Managed supervised services require a stop
-hook and a non-answering declared port before destroy. See
-[the lifecycle limits](docs/workspace-lifecycle.md).
-
-## Scoped access and recovery (experimental)
-
-`continuum access` creates show-once per-block observer/controller/moderator
-grants, changes block sharing, revokes grants and reads the bounded audit. The
-browser doorway accepts observer credentials only; the root operator token is
-never accepted there. `continuum backup` creates or restores a checked offline
-state backup. Keep grant files private and run recovery with the daemon stopped.
-See [the access and operations contract](docs/access-operations.md).
-
-## Status & docs
-
-Public alpha `0.1.0-alpha.2` — see [CHANGELOG.md](CHANGELOG.md). Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition, managed headless cycle and network-free WAN-runner checks). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. The opt-in [three-server WAN drill](docs/wan-multi-server-test.md) has run once against two remote hosts (below). Still open: structured-session (ACP) process survival across daemon restart, broad provider/platform validation and untrusted multi-user hosting.
-
-Tested on 2026-09-17: macOS/arm64 full isolated gate; Linux/arm64 Docker core
-race gate and headless managed cycle; two macOS hosts with one dropped SSH
-bridge request, an outage, coordinator restart and 2-second bridge latency;
-OMP 18 with local Ollama `qwen3.5:0.8b` over ACP. On 2026-09-18: the
-three-server WAN drill from a macOS coordinator to two temporary Linux/amd64
-hosts (AWS Mumbai and N. Virginia; ~0.5 s and ~3.5 s per SSH bridge call),
-all seven cases; and the Menagerie client follow-through (CU1–CU7) against
-this daemon in a browser. These are bounded checks, not a Linux
-systemd/service-install test, a lossy-WAN benchmark, an arm64 remote host, or
-validation of cloud ACP providers. No installed relay was replaced or restarted.
-
-- [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
-- [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions
-- [docs/local-alpha.md](docs/local-alpha.md) — the alpha contract and limits
-- [docs/terminal-screen-api.md](docs/terminal-screen-api.md) — server-owned screens (screen-v1)
-- [docs/service.md](docs/service.md) — running the daemon always-on
-- [docs/shared-runtime.md](docs/shared-runtime.md) — Menagerie lineage and cutover
-- [docs/legacy-conformance.md](docs/legacy-conformance.md) · [DEFERRED.md](DEFERRED.md) — coverage and later work
+[docs/architecture.md](docs/architecture.md) · [CHANGELOG.md](CHANGELOG.md) · [SPEC.md](SPEC.md) · [docs/v1-contract.md](docs/v1-contract.md) · [docs/service.md](docs/service.md) · [DEFERRED.md](DEFERRED.md)
 
 Licensed AGPL-3.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for the Menagerie relay lineage.
