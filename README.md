@@ -117,14 +117,18 @@ See [the access and operations contract](docs/access-operations.md).
 
 ## Status & docs
 
-Local alpha `0.1.0-alpha.2-dev`. Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition, managed headless cycle and network-free WAN-runner checks). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. An opt-in [three-server WAN drill](docs/wan-multi-server-test.md) is ready for a later run; its real-host results are not yet claimed. Still open: structured-session (ACP) process survival across daemon restart, Menagerie client CU1–CU7, broad provider/platform validation and untrusted multi-user hosting.
+Public alpha `0.1.0-alpha.2` — see [CHANGELOG.md](CHANGELOG.md). Gate: `python3 scripts/verify.py verify` (race detector, CLI/terminal journeys, legacy, schema-upgrade, isolated SSH bridge, stream composition, managed headless cycle and network-free WAN-runner checks). Set `CONTINUUM_TEST_NU` to a Nushell binary to include its live pipeline check. The opt-in `real-acp` feature requires an installed `ollama/` model and passes no cloud credentials to the agent. The separate real two-host script uses trusted SSH and isolated temporary daemons. The opt-in [three-server WAN drill](docs/wan-multi-server-test.md) has run once against two remote hosts (below). Still open: structured-session (ACP) process survival across daemon restart, broad provider/platform validation and untrusted multi-user hosting.
 
 Tested on 2026-09-17: macOS/arm64 full isolated gate; Linux/arm64 Docker core
 race gate and headless managed cycle; two macOS hosts with one dropped SSH
 bridge request, an outage, coordinator restart and 2-second bridge latency;
-OMP 18 with local Ollama `qwen3.5:0.8b` over ACP. These are bounded checks,
-not a Linux systemd/service-install test, a lossy-WAN benchmark, or validation
-of cloud ACP providers. No installed relay was replaced or restarted.
+OMP 18 with local Ollama `qwen3.5:0.8b` over ACP. On 2026-09-18: the
+three-server WAN drill from a macOS coordinator to two temporary Linux/amd64
+hosts (AWS Mumbai and N. Virginia; ~0.5 s and ~3.5 s per SSH bridge call),
+all seven cases; and the Menagerie client follow-through (CU1–CU7) against
+this daemon in a browser. These are bounded checks, not a Linux
+systemd/service-install test, a lossy-WAN benchmark, an arm64 remote host, or
+validation of cloud ACP providers. No installed relay was replaced or restarted.
 
 - [SPEC.md](SPEC.md) — architecture, failure guarantees, milestones
 - [docs/v1-contract.md](docs/v1-contract.md) — the `/v1` contract and how it versions

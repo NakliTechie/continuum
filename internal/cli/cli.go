@@ -35,7 +35,7 @@ import (
 )
 
 // Version may be stamped with the source revision by local artifact builds.
-var Version = "0.1.0-alpha.2-dev"
+var Version = "0.1.0-alpha.2"
 
 type credentialKey struct{}
 
