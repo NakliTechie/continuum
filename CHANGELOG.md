@@ -5,6 +5,15 @@ All notable changes to Continuum are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Pre-1.0, the `/v1` API contract
 (`continuum contract`) is the compatibility promise, not the binary version.
 
+## [0.1.0-alpha.3] — 2026-10-22
+
+Rebuilt with Go 1.26.10 after the eMudhra CA compromise (Go 1.26.10 and 1.27.3
+block the eight compromised intermediates in the standard library). Go 1.27.3
+is not used: it escapes U+2028/U+2029 in already-framed JSON, so
+`TestO4CheckerFullFidelity` (byte-exact ACP frames) fails there. No source
+change to the daemon, CLI or protocol. Archives are named
+`continuum_0.1.0-alpha.3_<os>_<arch>.tar.gz`.
+
 ## [0.1.0-alpha.2] — 2026-09-18
 
 First tagged release. Public alpha, AGPL-3.0. macOS and Linux, single static

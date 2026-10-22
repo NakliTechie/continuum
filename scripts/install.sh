@@ -8,7 +8,7 @@
 #              CONTINUUM_INSTALL_DIR (default: $HOME/.local/bin).
 set -eu
 
-VERSION="${CONTINUUM_VERSION:-0.1.0-alpha.2}"
+VERSION="${CONTINUUM_VERSION:-0.1.0-alpha.3}"
 DIR="${CONTINUUM_INSTALL_DIR:-$HOME/.local/bin}"
 BASE="https://github.com/NakliTechie/continuum/releases/download/v${VERSION}"
 
