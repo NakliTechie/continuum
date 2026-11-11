@@ -2,6 +2,7 @@ package repoinfo
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func fakeGH(t *testing.T, script string) (*Reader, string) {
 func TestInbox(t *testing.T) {
 	ctx := context.Background()
 	t.Run("ok, both lanes, titles cut", func(t *testing.T) {
-		long := strings.Repeat("t", 300)
+		long := strings.Repeat("é", 300) // 2 bytes each: the cut counts characters
 		r, log := fakeGH(t, `case "$*" in
 *"search prs"*) echo '[{"number":14783,"title":"`+long+`","url":"https://github.com/cli/cli/pull/14783","updatedAt":"2026-10-21T18:17:09Z","isDraft":true,"repository":{"nameWithOwner":"cli/cli"},"author":{"login":"m"}}]';;
 *"search issues"*) echo '[{"number":2,"title":"Proposal","url":"javascript:alert(1)","updatedAt":"x","repository":{"nameWithOwner":"NakliTechie/menagerie"},"author":{"login":"N"},"labels":[{"name":"bug"}]}]';;
@@ -39,7 +40,7 @@ esac`)
 			t.Fatalf("got %+v", got)
 		}
 		pr := got.ReviewRequested[0]
-		if pr.Kind != "pr" || pr.Repo != "cli/cli" || pr.Number != 14783 || len(pr.Title) != maxTitle || !pr.Draft {
+		if pr.Kind != "pr" || pr.Repo != "cli/cli" || pr.Number != 14783 || len([]rune(pr.Title)) != maxTitle || !pr.Draft {
 			t.Fatalf("pr %+v", pr)
 		}
 		is := got.Assigned[0]
@@ -92,6 +93,41 @@ esac`)
 	})
 }
 
+func TestInboxThrottle(t *testing.T) {
+	r, log := fakeGH(t, `echo '[]'`)
+	for i := 0; i < 5; i++ {
+		if got := r.Inbox(context.Background()).State; got != StateOK {
+			t.Fatalf("state %q", got)
+		}
+	}
+	calls, _ := os.ReadFile(log)
+	if n := strings.Count(string(calls), "search"); n != 2 {
+		t.Fatalf("5 refreshes inside the interval ran %d searches, want 2", n)
+	}
+}
+
+func TestJSONShapes(t *testing.T) {
+	ctx := context.Background()
+	r, _ := fakeGH(t, `case "$*" in
+*"pr view"*) echo '{"number":7,"url":"https://github.com/a/b/pull/7","state":"OPEN","headRefName":"f"}';;
+*"pr checks"*) echo "no checks reported on the 'f' branch" >&2; exit 1;;
+*"issue view"*) echo '{"number":2,"title":"t","state":"OPEN","url":"https://github.com/a/b/issues/2","body":"","author":{"login":""}}';;
+esac`)
+	b, _ := json.Marshal(r.SessionPR(ctx, t.TempDir()))
+	if !strings.Contains(string(b), `"checks":[]`) {
+		t.Fatalf("session_pr %s", b)
+	}
+	b, _ = json.Marshal(r.GetItem(ctx, "issue", "a/b", 2))
+	if strings.Contains(string(b), "cross_repository") || !strings.Contains(string(b), `"author":""`) {
+		t.Fatalf("issue item %s", b)
+	}
+	clean := parsePorcelainV2([]byte("# branch.oid 0123456789\x00# branch.head main\x00"))
+	b, _ = json.Marshal(clean)
+	if !strings.Contains(string(b), `"files":[]`) || !strings.Contains(string(b), `"detached":false`) || !strings.Contains(string(b), `"unborn":false`) {
+		t.Fatalf("git snapshot %s", b)
+	}
+}
+
 func TestInboxTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits for the gh deadline")
@@ -124,7 +160,7 @@ func TestGetItem(t *testing.T) {
 		r, log := fakeGH(t, `echo '{"number":14783,"title":"t","state":"OPEN","url":"https://github.com/cli/cli/pull/14783","body":"`+strings.Repeat("b", maxBody+10)+`","author":{"login":"m"},"headRefName":"release-download-verify","headRepository":{"nameWithOwner":"mrecachinas/cli"},"isCrossRepository":true,"maintainerCanModify":true}'`)
 		got := r.GetItem(ctx, "pr", "cli/cli", 14783)
 		it := got.Item
-		if got.State != StateOK || it == nil || !it.CrossRepository || it.HeadRepo != "mrecachinas/cli" || !it.MaintainerCanModify || len(it.Body) != maxBody || !it.BodyTruncated {
+		if got.State != StateOK || it == nil || it.CrossRepository == nil || !*it.CrossRepository || it.HeadRepo != "mrecachinas/cli" || it.MaintainerCanModify == nil || !*it.MaintainerCanModify || len(it.Body) != maxBody || !it.BodyTruncated {
 			t.Fatalf("got %+v %+v", got, it)
 		}
 		calls, _ := os.ReadFile(log)

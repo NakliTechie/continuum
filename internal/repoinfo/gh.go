@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -25,7 +26,7 @@ type InboxItem struct {
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
 	URL       string   `json:"url"`
-	Author    string   `json:"author,omitempty"`
+	Author    string   `json:"author"`
 	UpdatedAt string   `json:"updated_at,omitempty"`
 	Draft     bool     `json:"draft,omitempty"`
 	Labels    []string `json:"labels,omitempty"`
@@ -44,14 +45,14 @@ type Item struct {
 	Number              int    `json:"number"`
 	Title               string `json:"title"`
 	URL                 string `json:"url"`
-	Author              string `json:"author,omitempty"`
+	Author              string `json:"author"`
 	State               string `json:"state"`
 	Body                string `json:"body"`
 	BodyTruncated       bool   `json:"body_truncated"`
 	HeadRef             string `json:"head_ref,omitempty"`
 	HeadRepo            string `json:"head_repo,omitempty"`
-	CrossRepository     bool   `json:"cross_repository,omitempty"`
-	MaintainerCanModify bool   `json:"maintainer_can_modify,omitempty"`
+	CrossRepository     *bool  `json:"cross_repository,omitempty"`      // pull requests only
+	MaintainerCanModify *bool  `json:"maintainer_can_modify,omitempty"` // pull requests only
 }
 
 type ItemResult struct {
@@ -82,7 +83,7 @@ type Check struct {
 type PRResult struct {
 	State       string         `json:"state"`
 	PR          *PR            `json:"pr,omitempty"`
-	Checks      []Check        `json:"checks,omitempty"`
+	Checks      []Check        `json:"checks"`
 	Summary     map[string]int `json:"summary,omitempty"`
 	ChecksTotal int            `json:"checks_total"`
 	Truncated   bool           `json:"truncated"`
@@ -108,6 +109,7 @@ func (r *Reader) ghEnv() []string {
 		"GH_PAGER=cat",
 		"NO_COLOR=1",
 		"CLICOLOR=0",
+		"LC_ALL=C", // gh's git children print untranslated messages for classifyGH
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
 	)
@@ -136,7 +138,7 @@ func classifyGH(res runResult) string {
 		return StateTimeout
 	}
 	if res.startErr != nil {
-		return StateGHMissing
+		return StateGHMissing // the binary could not be started
 	}
 	e := strings.ToLower(res.stderr)
 	switch {
@@ -182,6 +184,16 @@ func safeURL(u string) string {
 	return ""
 }
 
+// cutChars keeps at most n characters (runes), for titles the spec counts in characters.
+func cutChars(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:n])
+}
+
+// cut keeps at most n bytes without splitting a UTF-8 sequence.
 func cut(s string, n int) (string, bool) {
 	if len(s) <= n {
 		return s, false
@@ -236,7 +248,7 @@ func (r *Reader) search(ctx context.Context, kind string) ([]InboxItem, bool, st
 	}
 	items := make([]InboxItem, 0, len(rows))
 	for _, row := range rows {
-		title, _ := cut(row.Title, maxTitle)
+		title := cutChars(row.Title, maxTitle)
 		it := InboxItem{Kind: kind, Repo: row.Repository.NameWithOwner, Number: row.Number, Title: title,
 			URL: safeURL(row.URL), Author: row.Author.Login, UpdatedAt: row.UpdatedAt, Draft: row.IsDraft}
 		if kind == "issue" {
@@ -254,10 +266,19 @@ func (r *Reader) search(ctx context.Context, kind string) ([]InboxItem, bool, st
 // review, and issues assigned to it. Explicit refresh only; the search API
 // allows 30 requests a minute.
 func (r *Reader) Inbox(ctx context.Context) Inbox {
+	r.inboxMu.Lock()
+	if !r.inboxAt.IsZero() && time.Since(r.inboxAt) < inboxMinInterval {
+		last := r.inboxLast
+		r.inboxMu.Unlock()
+		return last
+	}
+	r.inboxMu.Unlock()
 	if !r.acquire() {
 		return Inbox{State: StateBusy}
 	}
 	defer r.release()
+	ctx, cancel := context.WithTimeout(ctx, ghDeadline) // one deadline for both searches
+	defer cancel()
 	prs, t1, st := r.search(ctx, "pr")
 	if st != "" {
 		return Inbox{State: st}
@@ -266,7 +287,11 @@ func (r *Reader) Inbox(ctx context.Context) Inbox {
 	if st != "" {
 		return Inbox{State: st}
 	}
-	return Inbox{State: StateOK, ReviewRequested: prs, Assigned: issues, Truncated: t1 || t2}
+	in := Inbox{State: StateOK, ReviewRequested: prs, Assigned: issues, Truncated: t1 || t2}
+	r.inboxMu.Lock()
+	r.inboxAt, r.inboxLast = time.Now(), in
+	r.inboxMu.Unlock()
+	return in
 }
 
 // GetItem fetches one issue or pull request for a handoff draft.
@@ -310,7 +335,7 @@ func (r *Reader) GetItem(ctx context.Context, kind, repo string, number int) Ite
 	if err := json.Unmarshal(res.stdout, &v); err != nil {
 		return ItemResult{State: StateUnavailable}
 	}
-	title, _ := cut(v.Title, maxTitle)
+	title := cutChars(v.Title, maxTitle)
 	body, bodyCut := cut(v.Body, maxBody)
 	it := &Item{Kind: kind, Repo: repo, Number: v.Number, Title: title, URL: safeURL(v.URL), Author: v.Author.Login,
 		State: v.State, Body: body, BodyTruncated: bodyCut}
@@ -319,8 +344,8 @@ func (r *Reader) GetItem(ctx context.Context, kind, repo string, number int) Ite
 		if v.HeadRepository != nil {
 			it.HeadRepo = v.HeadRepository.NameWithOwner
 		}
-		it.CrossRepository = v.IsCrossRepository
-		it.MaintainerCanModify = v.MaintainerCanModify
+		it.CrossRepository = &v.IsCrossRepository
+		it.MaintainerCanModify = &v.MaintainerCanModify
 	}
 	return ItemResult{State: StateOK, Item: it}
 }
@@ -336,6 +361,8 @@ func (r *Reader) SessionPR(ctx context.Context, dir string) PRResult {
 		return PRResult{State: StateBusy}
 	}
 	defer r.release()
+	ctx, cancel := context.WithTimeout(ctx, ghDeadline) // one deadline for both calls
+	defer cancel()
 	res, st := r.gh(ctx, dir, "pr", "view", "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,headRefName,headRefOid,isCrossRepository")
 	if st != "" {
 		return PRResult{State: st}
@@ -360,6 +387,7 @@ func (r *Reader) SessionPR(ctx context.Context, dir string) PRResult {
 	out := PRResult{State: StateOK, PR: &PR{Number: v.Number, URL: safeURL(v.URL), State: v.State, Draft: v.IsDraft,
 		ReviewDecision: v.ReviewDecision, MergeState: v.MergeStateStatus, HeadRef: v.HeadRefName,
 		HeadOID: v.HeadRefOid, CrossRepository: v.IsCrossRepository},
+		Checks:  []Check{},
 		Summary: map[string]int{"pass": 0, "fail": 0, "pending": 0, "skipping": 0, "cancel": 0}}
 
 	res, st = r.gh(ctx, dir, "pr", "checks", strconv.Itoa(v.Number), "--json", "name,state,bucket,workflow,link")
@@ -381,8 +409,8 @@ func (r *Reader) SessionPR(ctx context.Context, dir string) PRResult {
 			out.Summary[c.Bucket]++
 		}
 		if i < MaxChecks {
-			c.Name, _ = cut(c.Name, maxTitle)
-			c.Workflow, _ = cut(c.Workflow, maxTitle)
+			c.Name = cutChars(c.Name, maxTitle)
+			c.Workflow = cutChars(c.Workflow, maxTitle)
 			c.Link = safeURL(c.Link)
 			out.Checks = append(out.Checks, c)
 		}

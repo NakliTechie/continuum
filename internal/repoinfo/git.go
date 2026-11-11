@@ -24,13 +24,13 @@ type GitFile struct {
 type GitSnapshot struct {
 	State      string    `json:"state"`
 	Branch     string    `json:"branch,omitempty"`
-	Detached   bool      `json:"detached,omitempty"`
-	Unborn     bool      `json:"unborn,omitempty"`
+	Detached   bool      `json:"detached"`
+	Unborn     bool      `json:"unborn"`
 	Head       string    `json:"head,omitempty"`
 	Upstream   string    `json:"upstream,omitempty"`
 	Ahead      *int      `json:"ahead,omitempty"`
 	Behind     *int      `json:"behind,omitempty"`
-	Files      []GitFile `json:"files,omitempty"`
+	Files      []GitFile `json:"files"`
 	FilesTotal int       `json:"files_total"`
 	Truncated  bool      `json:"truncated"`
 }
@@ -65,13 +65,16 @@ func (r *Reader) GitStatus(ctx context.Context, dir string) GitSnapshot {
 	if git == "" {
 		git = "git"
 	}
-	res := r.run(ctx, gitDeadline, dir, r.gitEnv(), git,
-		"-c", "core.fsmonitor=false",
+	env := r.gitEnv()
+	args := []string{"-c", "core.fsmonitor=false"}
+	args = append(args, r.filterOverrides(ctx, git, dir, env)...)
+	args = append(args,
 		"-c", "core.untrackedCache=false",
 		"-c", "status.showUntrackedFiles=normal",
 		"-c", "diff.external=",
 		"--no-pager", "--no-optional-locks",
 		"status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", "--ignore-submodules=dirty")
+	res := r.run(ctx, gitDeadline, dir, env, git, args...)
 	switch {
 	case res.timedOut:
 		return GitSnapshot{State: StateTimeout}
@@ -83,16 +86,59 @@ func (r *Reader) GitStatus(ctx context.Context, dir string) GitSnapshot {
 		}
 		return GitSnapshot{State: StateUnavailable}
 	}
-	snap := parsePorcelainV2(res.stdout)
+	out := res.stdout
+	if res.overflow {
+		// The last -z record may end mid-path; drop it.
+		if i := bytes.LastIndexByte(out, 0); i >= 0 {
+			out = out[:i]
+		} else {
+			out = nil
+		}
+	}
+	snap := parsePorcelainV2(out)
 	if res.overflow {
 		snap.Truncated = true
 	}
 	return snap
 }
 
+// filterOverrides blanks every content filter driver that the repository's
+// own configuration (local, worktree or command scope) defines, because
+// `git status` runs a clean filter to re-check a file whose stat data is out
+// of date. Drivers from the user's global configuration (git-lfs and the
+// like) are the machine owner's choice and stay on. Listing config runs no
+// filter.
+func (r *Reader) filterOverrides(ctx context.Context, git, dir string, env []string) []string {
+	res := r.run(ctx, gitDeadline, dir, env, git, "config", "--null", "--show-scope", "--name-only", "--get-regexp", `^filter\.`)
+	if res.code != 0 || res.timedOut {
+		return nil
+	}
+	parts := bytes.Split(res.stdout, []byte{0})
+	seen := map[string]bool{}
+	var out []string
+	for i := 0; i+1 < len(parts); i += 2 {
+		scope, name := string(parts[i]), string(parts[i+1])
+		if scope == "global" || scope == "system" {
+			continue
+		}
+		key := strings.TrimPrefix(name, "filter.")
+		dot := strings.LastIndexByte(key, '.')
+		if dot <= 0 {
+			continue
+		}
+		driver := key[:dot]
+		if seen[driver] {
+			continue
+		}
+		seen[driver] = true
+		out = append(out, "-c", "filter."+driver+".clean=", "-c", "filter."+driver+".smudge=", "-c", "filter."+driver+".process=", "-c", "filter."+driver+".required=false")
+	}
+	return out
+}
+
 // parsePorcelainV2 parses `git status --porcelain=v2 --branch -z` output.
 func parsePorcelainV2(out []byte) GitSnapshot {
-	snap := GitSnapshot{State: StateOK}
+	snap := GitSnapshot{State: StateOK, Files: []GitFile{}}
 	recs := bytes.Split(out, []byte{0})
 	add := func(path, x, y string) {
 		snap.FilesTotal++
@@ -100,9 +146,7 @@ func parsePorcelainV2(out []byte) GitSnapshot {
 			snap.Truncated = true
 			return
 		}
-		if len(path) > maxPathLen {
-			path = path[:maxPathLen]
-		}
+		path, _ = cut(path, maxPathLen)
 		snap.Files = append(snap.Files, GitFile{Path: path, Index: x, Worktree: y})
 	}
 	for i := 0; i < len(recs); i++ {

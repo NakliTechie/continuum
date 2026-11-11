@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -48,7 +50,16 @@ type Reader struct {
 	GHPath  string   // default: "gh" on PATH, then Homebrew locations
 	Env     []string // default: os.Environ()
 	sem     chan struct{}
+
+	inboxMu   sync.Mutex
+	inboxAt   time.Time
+	inboxLast Inbox
 }
+
+// inboxMinInterval answers a repeated inbox refresh from the last result, so
+// one client cannot spend the login's 30-a-minute search allowance, which
+// agents on the same machine share.
+const inboxMinInterval = 10 * time.Second
 
 // New returns a Reader that allows at most n reads in flight; more answer busy.
 func New(n int) *Reader {
@@ -118,7 +129,15 @@ func (r *Reader) run(ctx context.Context, deadline time.Duration, dir string, en
 	cmd.Stdout = out
 	cmd.Stderr = errw
 	cmd.WaitDelay = time.Second
-	err := cmd.Run()
+	// Run the child in its own process group and kill the whole group on
+	// timeout, so a filter started by git or a git started by gh cannot
+	// outlive the read.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	if err := cmd.Start(); err != nil {
+		return runResult{code: -1, startErr: err}
+	}
+	err := cmd.Wait()
 	res := runResult{stdout: out.buf.Bytes(), stderr: errw.buf.String(), overflow: out.overflow}
 	if ctx.Err() == context.DeadlineExceeded {
 		res.timedOut = true
@@ -131,9 +150,12 @@ func (r *Reader) run(ctx context.Context, deadline time.Duration, dir string, en
 		res.code = 0
 	case errors.As(err, &exit):
 		res.code = exit.ExitCode()
+	case errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil:
+		// The child exited but a descendant still held its pipes; its own
+		// exit status is the answer.
+		res.code = cmd.ProcessState.ExitCode()
 	default:
 		res.code = -1
-		res.startErr = err
 	}
 	return res
 }

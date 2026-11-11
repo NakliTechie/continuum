@@ -68,7 +68,8 @@ func (cn *conn) handleRepoRead(typ string, raw json.RawMessage) {
 		dir = e.cwd
 	}
 	go func() {
-		ctx := s.ctx
+		// The connection's context: a client that goes away frees its read slot.
+		ctx := cn.ctx
 		switch typ {
 		case protocol.TypeGitStatus:
 			_ = cn.send(gitStatusResult{Type: protocol.TypeGitStatusResult, SessionID: msg.SessionID, RequestID: msg.RequestID,

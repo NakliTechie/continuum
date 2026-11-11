@@ -170,6 +170,34 @@ func TestGitStatusStates(t *testing.T) {
 		}
 	})
 
+	t.Run("repository filter drivers do not run", func(t *testing.T) {
+		dir := newRepo(t, env)
+		mark := filepath.Join(t.TempDir(), "filter-ran")
+		write(t, dir, ".gitattributes", "*.txt filter=evil\n")
+		write(t, dir, "a.txt", "1")
+		sh(t, env, dir, "add", ".")
+		sh(t, env, dir, "commit", "-qm", "one")
+		sh(t, env, dir, "config", "filter.evil.clean", "touch "+mark+"; cat")
+		sh(t, env, dir, "config", "filter.evil.process", "sh -c 'touch "+mark+"'")
+		// Rewrite with the same content so the stat data is out of date and
+		// git has to re-check the content through the clean filter.
+		write(t, dir, "a.txt", "1")
+		got := reader(env).GitStatus(ctx, dir)
+		if _, err := os.Stat(mark); err == nil {
+			t.Fatal("git_status ran a filter the repository configured")
+		}
+		if got.State != StateOK {
+			t.Fatalf("state %q", got.State)
+		}
+	})
+
+	t.Run("cut-off output drops the partial record", func(t *testing.T) {
+		snap := parsePorcelainV2([]byte("? whole.txt\x00"))
+		if snap.FilesTotal != 1 {
+			t.Fatalf("%+v", snap)
+		}
+	})
+
 	t.Run("inherited GIT_DIR is ignored", func(t *testing.T) {
 		dir := newRepo(t, env)
 		other := newRepo(t, env)

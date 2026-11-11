@@ -30,7 +30,7 @@ func TestLiveReadOnlyGH(t *testing.T) {
 	}
 	it := r.GetItem(ctx, "pr", "cli/cli", 14783)
 	show("item cli/cli#14783", it)
-	if it.State != StateOK || it.Item == nil || !it.Item.CrossRepository {
+	if it.State != StateOK || it.Item == nil || it.Item.CrossRepository == nil || !*it.Item.CrossRepository || it.Item.HeadRepo == "" {
 		t.Fatalf("item %+v", it)
 	}
 	is := r.GetItem(ctx, "issue", "NakliTechie/menagerie", 2)
