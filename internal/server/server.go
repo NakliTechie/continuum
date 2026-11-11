@@ -36,6 +36,7 @@ import (
 	"github.com/NakliTechie/continuum/internal/jsonwire"
 	"github.com/NakliTechie/continuum/internal/protocol"
 	"github.com/NakliTechie/continuum/internal/pty"
+	"github.com/NakliTechie/continuum/internal/repoinfo"
 	"github.com/NakliTechie/continuum/internal/shims"
 	"github.com/NakliTechie/continuum/internal/tmux"
 )
@@ -54,6 +55,10 @@ type sessionEntry struct {
 	parent         string // protocol 1.3: parent session id (supervisor tree); "" for a root. Guarded by s.mu.
 	recording      string
 	recordingLines int
+	// cwd is the absolute directory the agent was started in, recorded at
+	// spawn for protocol 1.5 repository reads. "" when unknown (adopted tmux
+	// or restored holder sessions); those reads answer no_directory.
+	cwd string
 
 	subMu sync.Mutex
 	sub   *conn // current subscriber connection (may be nil between reconnects)
@@ -117,6 +122,7 @@ type Server struct {
 	connMu    sync.Mutex
 	conns     map[*conn]context.CancelFunc
 	modern    *Modern
+	repo      *repoinfo.Reader // protocol 1.5 reads; bounded concurrency
 
 	cfg   *config.Config
 	shims map[string]shims.Shim
@@ -138,6 +144,7 @@ func New(cfg *config.Config) *Server {
 		cfg:      cfg,
 		shims:    shims.NewRegistry(cfg.AgentCommands()),
 		sessions: make(map[string]*sessionEntry),
+		repo:     repoinfo.New(4),
 	}
 }
 
@@ -736,6 +743,7 @@ func (s *Server) hello() protocol.Hello {
 		HostsChildren:   true, // protocol 1.3: parentage + subtree kill
 		AgentTransports: agentTransports,
 		ResumeAgents:    resumable,
+		Capabilities:    []string{protocol.CapSessionGit, protocol.CapGitHubInbox, protocol.CapSessionPR},
 	}
 }
 
@@ -779,6 +787,8 @@ func (cn *conn) dispatch(env protocol.Envelope, raw json.RawMessage) {
 		cn.handlePrompt(raw)
 	case protocol.TypePermissionResponse:
 		cn.handlePermissionResponse(raw)
+	case protocol.TypeGitStatus, protocol.TypeSessionPR, protocol.TypeGitHubInbox, protocol.TypeGitHubItem:
+		cn.handleRepoRead(env.Type, raw)
 	case protocol.TypeResume:
 		// Superseded by sessions+attach (1.1); keep a graceful answer for old clients.
 		var msg protocol.Resume
@@ -912,7 +922,7 @@ func (cn *conn) handleSpawnPTY(msg protocol.Spawn) {
 		return
 	}
 	parent := s.validParent(msg.ParentSessionID)
-	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName, parent: parent, recording: cn.recording, recordingLines: cn.recordingLines}, id)
+	s.addSession(&sessionEntry{token: token, sess: sess, agent: msg.Agent, startedAt: sess.StartedAt, pid: sess.PID, sub: cn, tmuxName: tmuxName, parent: parent, recording: cn.recording, recordingLines: cn.recordingLines, cwd: absDir(msg.Cwd)}, id)
 	_ = cn.send(protocol.Spawned{
 		Type:            protocol.TypeSpawned,
 		SessionID:       id,
@@ -983,6 +993,7 @@ func (cn *conn) handleSpawnACP(msg protocol.Spawn) {
 		sub:       cn,
 		outbox:    make(chan []byte, outboxCapacity),
 		parent:    parent,
+		cwd:       absDir(msg.Cwd),
 	}
 	s.addSession(e, id)
 

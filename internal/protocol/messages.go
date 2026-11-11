@@ -55,6 +55,17 @@ const (
 	TypePermissionRequest  = "permission_request"
 	TypePermissionResponse = "permission_response"
 	TypePrompt             = "prompt"
+
+	// Protocol 1.5: capability-gated repository and GitHub reads (1.4 is
+	// reserved for the per-session usage object).
+	TypeGitStatus         = "git_status"
+	TypeGitStatusResult   = "git_status_result"
+	TypeGitHubInbox       = "github_inbox"
+	TypeGitHubInboxResult = "github_inbox_result"
+	TypeGitHubItem        = "github_item"
+	TypeGitHubItemResult  = "github_item_result"
+	TypeSessionPR         = "session_pr"
+	TypeSessionPRResult   = "session_pr_result"
 )
 
 // Transports.
@@ -161,6 +172,29 @@ type Hello struct {
 	// ResumeAgents lists the agent ids this relay can restart into one of their
 	// own past conversations (spawn.resume_agent_session). Absent/empty ⇒ none.
 	ResumeAgents []string `json:"resume_agents,omitempty"`
+	// Capabilities (protocol 1.5) names optional features a client may use.
+	// A client sends a 1.5 request only when its capability is listed.
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// Protocol 1.5 capability names.
+const (
+	CapSessionGit  = "session_git_v1"
+	CapGitHubInbox = "github_inbox_v1"
+	CapSessionPR   = "session_pr_v1"
+)
+
+// RepoRequest is the browser's git_status / session_pr / github_inbox /
+// github_item request. Session reads carry SessionID and SessionToken; the
+// runtime reads in the directory it recorded at spawn, never a client path.
+type RepoRequest struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id,omitempty"`
+	SessionToken string `json:"session_token,omitempty"`
+	RequestID    string `json:"request_id"`
+	Kind         string `json:"kind,omitempty"`   // github_item: issue | pr
+	Repo         string `json:"repo,omitempty"`   // github_item: owner/name
+	Number       int    `json:"number,omitempty"` // github_item
 }
 
 type Registered struct {
