@@ -212,7 +212,15 @@ func (m *Modern) recordBlock(id string, e *sessionEntry) {
 func (m *Modern) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	reply := func(v api.Response) { enc := json.NewEncoder(w); enc.SetEscapeHTML(false); _ = enc.Encode(v) }
+	// jsonwire keeps embedded event payloads byte-for-byte (see jsonwire.Marshal).
+	reply := func(v api.Response) {
+		b, err := jsonwire.Marshal(v)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(append(b, '\n'))
+	}
 	if r.Method != "POST" {
 		w.WriteHeader(405)
 		reply(api.Error("", "invalid_request", "method", "use POST /v1", "help"))

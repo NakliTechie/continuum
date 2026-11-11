@@ -1118,7 +1118,7 @@ func (e *sessionEntry) nextSeq() int64 {
 // `config_option_update`. Re-surfacing, not fabrication: the array is verbatim
 // from the agent; only the delivery channel changes (response → notification).
 func configOptionUpdate(sessionID string, configOptions json.RawMessage) json.RawMessage {
-	b, _ := json.Marshal(map[string]any{
+	b, _ := jsonwire.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "session/update",
 		"params": map[string]any{
@@ -1137,7 +1137,7 @@ func configOptionUpdate(sessionID string, configOptions json.RawMessage) json.Ra
 // rides a menagerie-namespaced update kind (`_menagerie/turn_usage`); clients
 // that do not know it render it dim, per ACP's `_`-prefix extension rule.
 func turnUsageUpdate(sessionID string, usage json.RawMessage) json.RawMessage {
-	b, _ := json.Marshal(map[string]any{
+	b, _ := jsonwire.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "session/update",
 		"params": map[string]any{
@@ -1433,7 +1433,7 @@ func (cn *conn) handleAttach(raw json.RawMessage) {
 			if params == nil {
 				continue
 			}
-			frame, err := json.Marshal(protocol.SessionUpdate{Type: protocol.TypeSessionUpdate, SessionID: msg.SessionID, Seq: -1, Acp: params})
+			frame, err := jsonwire.Marshal(protocol.SessionUpdate{Type: protocol.TypeSessionUpdate, SessionID: msg.SessionID, Seq: -1, Acp: params})
 			if err != nil {
 				continue
 			}
